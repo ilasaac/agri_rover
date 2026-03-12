@@ -818,17 +818,10 @@ def _status_loop() -> None:
         acc_s   = _c(f"{s.h_accuracy_m:.3f}m", acc_col)
         sats_s  = _c(str(s.num_sats), _GR if s.num_sats >= 8 else _YL)
 
-        # ── CH1–CH9 values ────────────────────────────────────────────────────
-        if s.is_emergency or s.is_autonomous:
-            _disp_active = False
-        elif ROVER_ID == 1:
-            _disp_active = (s.rover_select <= ROVER_SELECT_LOW) or (s.rover_select > ROVER_SELECT_HIGH)
-        else:
-            _disp_active = s.rover_select > ROVER_SELECT_LOW
-
+        # ── CH1–CH9 raw values from RP2040 UART ──────────────────────────────
         _rc = (list(s.rc_channels) + [PPM_CENTER] * 9)[:9]
         def _cv(i: int) -> str:
-            v   = _rc[i] if (i == 8 or _disp_active) else PPM_CENTER
+            v   = _rc[i]
             col = _GR if v > 1700 else (_RD if v < 1300 else _DM)
             return f"{col}CH{i+1}:{v}{_R}"
         _ch_row1 = "  ".join(_cv(i) for i in range(5))
