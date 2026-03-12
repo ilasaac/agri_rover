@@ -221,12 +221,22 @@ class UARTBridge:
             pass
 
     def _recv_loop(self) -> None:
+        _log_path = f"/tmp/rv{ROVER_ID}_uart.log"
+        _log_lines = 0
+        _log_max   = 50   # capture first 50 lines then stop logging
         while self._running:
             try:
                 raw = self._ser.readline()
                 if raw:
                     line = raw.decode("utf-8", errors="ignore").strip()
                     if line:
+                        if _log_lines < _log_max:
+                            try:
+                                with open(_log_path, "a") as _f:
+                                    _f.write(line + "\n")
+                                _log_lines += 1
+                            except Exception:
+                                pass
                         self._parse_line(line)
             except Exception:
                 time.sleep(0.01)
@@ -619,12 +629,19 @@ class MAVLink:
             self._handle_command(msg)
 
     def _handle_rc_override(self, msg) -> None:
-        ch = [
+        raw = [
             msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw,
             msg.chan5_raw, msg.chan6_raw, msg.chan7_raw, msg.chan8_raw,
         ]
-        # Replace 0/65535 with center
-        ch = [PPM_CENTER if v in (0, 65535) else v for v in ch]
+        # Per MAVLink spec: 0 = "do not change this channel" (pass-through).
+        # Many GCS apps send continuous RC_CHANNELS_OVERRIDE with 0/65535 on
+        # all channels just to stay connected — that must NOT block the RP2040
+        # UART path.  Only claim an active GCS override when at least one
+        # motion channel (CH1 throttle, CH2 steering) has a real value.
+        has_motion = any(v not in (0, 65535) for v in (raw[CH_THROTTLE], raw[CH_STEERING]))
+
+        # Replace pass-through markers with center for PPM output
+        ch = [PPM_CENTER if v in (0, 65535) else v for v in raw]
 
         swa = ch[CH_EMERGENCY]
         swb = ch[CH_MODE]
@@ -651,8 +668,10 @@ class MAVLink:
 
         uart.send_ppm(effective)
         with state_lock:
-            state.last_rc_override_t = time.monotonic()
-            state.rc_channels   = list(ch) + [rover_sel]
+            if has_motion:
+                # Real GCS joystick input — take priority over UART for 0.5 s
+                state.last_rc_override_t = time.monotonic()
+                state.rc_channels = list(ch) + [rover_sel]
             state.ppm_channels  = effective
             state.is_emergency  = is_emergency
             state.is_autonomous = is_autonomous
