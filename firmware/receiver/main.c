@@ -16,6 +16,12 @@
  *
  * Failsafe: PPM stops if no CC1101 packet received for >500 ms OR
  *           Jetson heartbeat lost in AUTONOMOUS mode.
+ *
+ * UART telemetry design (CH: lines sent to Jetson 2):
+ *   9 channels are output: CH1/CH2 are always the RAW decoded stick values
+ *   (not gated to 1500 by mode logic), CH9 is the rover-selection switch.
+ *   The Jetson applies its own independent gating; the RP2040 gates only
+ *   the PPM motor output.  This mirrors the emitter firmware convention.
  */
 
 #include <stdio.h>
@@ -47,6 +53,10 @@ typedef enum { MODE_MANUAL, MODE_AUTONOMOUS, MODE_EMERGENCY } rover_mode_t;
 // ── Globals ───────────────────────────────────────────────────────────────
 static uint8_t  sbus_buffer[25];
 static uint16_t ppm_channels[8];
+
+static uint16_t rover_select_ppm = 1500;  // CH9: 1000=RV1 1500=RV2 2000=both
+#define ROVER_SELECT_LOW   1250
+#define ROVER_SELECT_HIGH  1750
 
 static uint16_t pi_throttle    = 1500;
 static uint16_t pi_steering    = 1500;
@@ -156,6 +166,17 @@ static void decode_sbus(void) {
     ppm_channels[6] = 3000 - ppm_channels[6];
     ppm_channels[7] = 3000 - ppm_channels[7];
 
+    // CH9: rover-selection switch (same SBUS source as emitter)
+    rover_select_ppm = (uint16_t)map_val(ch[8], 172, 1811, 1000, 2000);
+    if (rover_select_ppm < 1000) rover_select_ppm = 1000;
+    if (rover_select_ppm > 2000) rover_select_ppm = 2000;
+
+    // Snapshot raw stick values BEFORE mode gating (see emitter for rationale).
+    // Jetson 2 receives these raw values and applies its own independent gating.
+    uint16_t raw_throttle = ppm_channels[0];
+    uint16_t raw_steering = ppm_channels[1];
+
+    // Mode logic — gates PPM motor output only, not UART telemetry
     const char *mode_str;
     if (ppm_channels[SWA_CH] < EMERGENCY_THRESHOLD) {
         ppm_channels[0] = 1500; ppm_channels[1] = 1500;
@@ -177,10 +198,12 @@ static void decode_sbus(void) {
         mode_str = "MANUAL";
     }
 
-    printf("CH:%d,%d,%d,%d,%d,%d,%d,%d MODE:%s\n",
-        ppm_channels[0], ppm_channels[1], ppm_channels[2], ppm_channels[3],
+    // Telemetry to Jetson 2: 9 channels — CH1/CH2 raw (ungated) stick values,
+    // CH3-CH8 switch/aux channels, CH9 rover-selection.
+    printf("CH:%d,%d,%d,%d,%d,%d,%d,%d,%d MODE:%s\n",
+        raw_throttle, raw_steering, ppm_channels[2], ppm_channels[3],
         ppm_channels[4], ppm_channels[5], ppm_channels[6], ppm_channels[7],
-        mode_str);
+        rover_select_ppm, mode_str);
     stdio_flush();
 }
 

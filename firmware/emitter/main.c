@@ -17,6 +17,14 @@
  *
  * Failsafe: PPM stops if SBUS is lost for >100 ms.
  * Autonomous mode: Jetson overrides CH1/CH2 when SWB active + HB alive.
+ *
+ * UART telemetry design (CH: lines sent to Jetson):
+ *   CH1/CH2 in the UART output are always the RAW SBUS stick values, even
+ *   when the PPM motor output is gated to 1500 (RELAY / AUTO / EMERGENCY).
+ *   This decouples the two paths:
+ *     • PPM output  — gated by this firmware for local motor safety.
+ *     • UART output — raw, so the Jetson and Rover 2 each apply their own
+ *                     independent gating without receiving false 1500 values.
  */
 
 #include <stdio.h>
@@ -157,7 +165,16 @@ static void parse_and_transmit_sbus(void) {
     if (rover_select_ppm < 1000) rover_select_ppm = 1000;
     if (rover_select_ppm > 2000) rover_select_ppm = 2000;
 
-    // Mode logic
+    // Snapshot raw stick values BEFORE mode gating.
+    // The PPM output (motor control) uses gated values so the motors are safe.
+    // The UART telemetry to the Jetson always carries the raw SBUS stick values
+    // so that Jetson 1 can relay them to Rover 2, and each Jetson / RP2040
+    // applies its own independent gating — none of them should receive
+    // pre-gated 1500 values and mistake them for "joystick at centre".
+    uint16_t raw_throttle = ppm_channels[0];
+    uint16_t raw_steering = ppm_channels[1];
+
+    // Mode logic — modifies ppm_channels[0/1] for PPM motor output only
     const char *mode_str;
     if (ppm_channels[SWA_CH] < EMERGENCY_THRESHOLD) {
         ppm_channels[0] = 1500; ppm_channels[1] = 1500;
@@ -176,8 +193,8 @@ static void parse_and_transmit_sbus(void) {
             mode_str = "AUTO-TIMEOUT";
         }
     } else if (rover_select_ppm > ROVER_SELECT_LOW && rover_select_ppm <= ROVER_SELECT_HIGH) {
-        // Rover 2 selected: this rover (master) outputs neutral PPM.
-        // The master Jetson relays the actual stick channels to the slave.
+        // Rover 2 selected: neutral PPM on this rover's motors.
+        // Raw stick values are relayed to Rover 2 via the Jetson (see below).
         ppm_channels[0] = 1500;
         ppm_channels[1] = 1500;
         mode_str = "RELAY";
@@ -185,9 +202,11 @@ static void parse_and_transmit_sbus(void) {
         mode_str = "MANUAL";
     }
 
-    // Telemetry to Jetson
+    // Telemetry to Jetson: CH1/CH2 are the raw (ungated) SBUS stick values.
+    // CH3-CH8 are switch/aux channels (gating does not affect them).
+    // CH9 is the rover-selection switch value.
     printf("CH:%d,%d,%d,%d,%d,%d,%d,%d,%d MODE:%s\n",
-        ppm_channels[0], ppm_channels[1], ppm_channels[2], ppm_channels[3],
+        raw_throttle, raw_steering, ppm_channels[2], ppm_channels[3],
         ppm_channels[4], ppm_channels[5], ppm_channels[6], ppm_channels[7],
         rover_select_ppm, mode_str);
     stdio_flush();
