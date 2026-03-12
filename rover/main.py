@@ -742,27 +742,27 @@ def _status_loop() -> None:
 
         # ── Assemble frame ────────────────────────────────────────────────────
         w   = 62
-        sep = f"  {_DM}{'─'*w}{_R}\n"
+        sep = f"  {_DM}{'─'*w}{_R}\r\n"
 
         frame = (
             "\033[H"   # cursor home
-            f"\n"
+            f"\r\n"
             f"  {_BD}{_WH}ROVER {ROVER_ID}{_R}  "
-            f"{armed_s}  {mode_s}  SEL: {sel_s}\n"
+            f"{armed_s}  {mode_s}  SEL: {sel_s}\r\n"
             f"{sep}"
-            f"  SBUS  {sbus_s}        HB  {hb_s}\n"
-            f"  THR   {thr_s}         STR {str_s}\n"
+            f"  SBUS  {sbus_s}        HB  {hb_s}\r\n"
+            f"  THR   {thr_s}         STR {str_s}\r\n"
             f"{sep}"
-            f"  GPS   {fix_s}   sats={sats_s}   acc={acc_s}\n"
-            f"  pos   {_WH}{s.lat:.7f}{_R}, {_WH}{s.lon:.7f}{_R}\n"
+            f"  GPS   {fix_s}   sats={sats_s}   acc={acc_s}\r\n"
+            f"  pos   {_WH}{s.lat:.7f}{_R}, {_WH}{s.lon:.7f}{_R}\r\n"
             f"  hdg   {_CY}{s.heading_deg:.1f}°{_R}   "
             f"alt={_WH}{s.alt_m:.1f}m{_R}   "
-            f"baseline={_DM}{s.baseline_m:.2f}m{_R}\n"
+            f"baseline={_DM}{s.baseline_m:.2f}m{_R}\r\n"
             f"{sep}"
             f"  TANK  {tank_s}   TEMP {temp_s}   HUMID {humid_s}   "
-            f"PRES {_WH}{s.pressure_hpa:.1f}hPa{_R}\n"
+            f"PRES {_WH}{s.pressure_hpa:.1f}hPa{_R}\r\n"
             f"  {_DM}{time.strftime('%H:%M:%S')}  "
-            f"GCS {GCS_HOST}:{GCS_PORT}  sysid={MAV_SYSTEM_ID}{_R}\n"
+            f"GCS {GCS_HOST}:{GCS_PORT}  sysid={MAV_SYSTEM_ID}{_R}\r\n"
             "\033[J"   # clear to end of screen
         )
 
