@@ -177,7 +177,7 @@ def _dispatch(rover_id: int, msg) -> None:
         elif t == "GPS_RAW_INT":
             s.fix_quality = msg.fix_type
             s.num_sats    = msg.satellites_visible
-            s.h_acc_m     = (msg.h_acc / 1000.0) if msg.h_acc != 65535 else s.h_acc_m
+            s.h_acc_m     = (msg.eph / 100.0) if msg.eph != 65535 else s.h_acc_m
             s.last_fix    = now
 
         elif t == "RC_CHANNELS":
@@ -276,7 +276,7 @@ def _render_rover(s: RoverSnapshot) -> list[str]:
     hb_str = f"{hb_age:.1f}s" if hb_age is not None else "---"
     hb_col = GREEN if (hb_age is not None and hb_age < 2) else RED
 
-    arm_str = f"{GREEN}ARMED{RESET}"  if s.armed else f"{RED}DISARMED{RESET}"
+    arm_str = f"{GREEN}ARMED   {RESET}" if s.armed else f"{RED}DISARMED{RESET}"
     lines.append(
         f"  {BOLD}{'━'*60}{RESET}"
     )
