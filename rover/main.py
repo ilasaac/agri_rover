@@ -452,11 +452,10 @@ class MAVLink:
     def connect(self) -> None:
         import socket as _socket
 
-        # Bind to rover-specific port (RV1=14550, RV2=14551) so both rovers can
-        # run on the same machine without conflicting, and so the GCS can send
-        # RC_CHANNELS_OVERRIDE here.
+        # Both rovers bind to 14550 — they always run on separate machines so
+        # there is no conflict, and the GCS broadcasts to this port on all hosts.
         self._mav = mavutil.mavlink_connection(
-            f"udpin:0.0.0.0:{MAVLINK_BIND_PORT}",
+            "udpin:0.0.0.0:14550",
             source_system    = MAV_SYSTEM_ID,
             source_component = MAV_COMPONENT_ID,
         )
@@ -563,7 +562,10 @@ class MAVLink:
         )
         self._send(lambda: self._mav.mav.rc_channels_send(*_args))
         if self._relay_mav:
-            self._relay_mav.mav.rc_channels_send(*_args)
+            try:
+                self._relay_mav.mav.rc_channels_send(*_args)
+            except Exception:
+                pass
 
     def send_gps_raw(self) -> None:
         with state_lock:
