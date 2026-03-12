@@ -614,36 +614,122 @@ def _uart_hb_loop() -> None:
             state.uart_hb_age = uart.heartbeat_age
         time.sleep(0.05)
 
+# ─── ANSI colours ─────────────────────────────────────────────────────────────
+
+_R  = "\033[0m"       # reset
+_BD = "\033[1m"       # bold
+_DM = "\033[2m"       # dim
+_RD = "\033[91m"      # red
+_GR = "\033[92m"      # green
+_YL = "\033[93m"      # yellow
+_CY = "\033[96m"      # cyan
+_WH = "\033[97m"      # white
+
+
+def _c(text: str, col: str, bold: bool = False) -> str:
+    return f"{_BD if bold else ''}{col}{text}{_R}"
+
+
 # ─── Status display ───────────────────────────────────────────────────────────
 
 def _status_loop() -> None:
-    fix_names = {0: "NO_FIX", 1: "GPS", 2: "DGPS", 4: "RTK_FIX", 5: "RTK_FLT"}
+    FIX_NAMES = {0: "NO_FIX", 1: "GPS", 2: "DGPS", 4: "RTK_FIX", 5: "RTK_FLT"}
+    FIX_COL   = {0: _RD, 1: _YL, 2: _YL, 4: _GR, 5: _CY}
+
+    import sys
+    sys.stdout.write("\033[2J")   # clear screen once on start
+
     while True:
         with state_lock:
             s = RoverState(**state.__dict__)
 
+        # ── Mode / arm ────────────────────────────────────────────────────────
+        if s.is_emergency:
+            mode_s = _c("EMERGENCY", _RD, bold=True)
+        elif s.is_autonomous:
+            mode_s = _c("AUTO", _YL, bold=True)
+        else:
+            mode_s = _c("MANUAL", _GR, bold=True)
+
+        armed_s = _c("ARMED", _GR, bold=True) if s.is_armed else _c("DISARMED", _DM)
+
+        # ── Rover selection (CH9) ─────────────────────────────────────────────
         ch9 = s.rover_select
         if ch9 > ROVER_SELECT_HIGH:
-            sel = "AUTO"
+            sel_s = _c(f"AUTO ({ch9})", _YL)
         elif ch9 > ROVER_SELECT_LOW:
-            sel = "RV2"
+            sel_s = _c(f"RV2  ({ch9})", _CY)
         else:
-            sel = "RV1"
+            sel_s = _c(f"RV1  ({ch9})", _GR)
 
-        sbus_str  = "OK" if s.sbus_ok else ("LOST" if s.sbus_ok is False else "--")
-        fix_str   = fix_names.get(s.fix_quality, str(s.fix_quality))
-        hb_str    = f"{s.uart_hb_age:.1f}s" if s.uart_hb_age is not None else "--"
-        mode_str  = "AUTO" if s.is_autonomous else ("EMERGENCY" if s.is_emergency else "MANUAL")
-        armed_str = "ARMED" if s.is_armed else "DISARMED"
+        # ── SBUS / HB ─────────────────────────────────────────────────────────
+        if s.sbus_ok is True:
+            sbus_s = _c("OK",   _GR)
+        elif s.sbus_ok is False:
+            sbus_s = _c("LOST", _RD, bold=True)
+        else:
+            sbus_s = _c("--",   _DM)
 
-        print(
-            f"\r[RV{ROVER_ID}] {armed_str} | {mode_str} | SEL:{sel} | "
-            f"SBUS:{sbus_str} | HB:{hb_str} | "
-            f"GPS:{fix_str} sats={s.num_sats} acc={s.h_accuracy_m:.2f}m | "
-            f"pos={s.lat:.6f},{s.lon:.6f} hdg={s.heading_deg:.1f}° | "
-            f"TANK:{s.tank_pct:.0f}% TEMP:{s.temp_c:.1f}°C HUMID:{s.humid_pct:.0f}%    ",
-            end="", flush=True,
+        if s.uart_hb_age is None:
+            hb_s = _c("--", _DM)
+        elif s.uart_hb_age < 1.0:
+            hb_s = _c(f"{s.uart_hb_age:.1f}s", _GR)
+        elif s.uart_hb_age < 2.5:
+            hb_s = _c(f"{s.uart_hb_age:.1f}s", _YL)
+        else:
+            hb_s = _c(f"{s.uart_hb_age:.1f}s", _RD)
+
+        # ── GPS ───────────────────────────────────────────────────────────────
+        fix_col = FIX_COL.get(s.fix_quality, _DM)
+        fix_s   = _c(FIX_NAMES.get(s.fix_quality, str(s.fix_quality)), fix_col, bold=(s.fix_quality == 4))
+        acc_col = _GR if s.h_accuracy_m < 0.05 else (_YL if s.h_accuracy_m < 0.5 else _RD)
+        acc_s   = _c(f"{s.h_accuracy_m:.3f}m", acc_col)
+        sats_s  = _c(str(s.num_sats), _GR if s.num_sats >= 8 else _YL)
+
+        # ── PPM bars (THR / STR) ──────────────────────────────────────────────
+        def _bar(val: int, w: int = 8) -> str:
+            frac   = max(0.0, min(1.0, (val - 1000) / 1000.0))
+            filled = round(frac * w)
+            col    = _GR if val > 1700 else (_RD if val < 1300 else _DM)
+            return f"{col}{'█'*filled}{'░'*(w-filled)}{_R} {val}"
+
+        thr_s = _bar(s.ppm_channels[0]) if s.ppm_channels else _c("--", _DM)
+        str_s = _bar(s.ppm_channels[1]) if s.ppm_channels else _c("--", _DM)
+
+        # ── Sensors ───────────────────────────────────────────────────────────
+        tank_col = _GR if s.tank_pct > 30 else (_YL if s.tank_pct > 15 else _RD)
+        tank_s   = _c(f"{s.tank_pct:.0f}%", tank_col)
+        temp_s   = _c(f"{s.temp_c:.1f}°C", _YL if s.temp_c > 40 else _WH)
+        humid_s  = _c(f"{s.humid_pct:.0f}%", _WH)
+
+        # ── Assemble frame ────────────────────────────────────────────────────
+        w   = 62
+        sep = f"  {_DM}{'─'*w}{_R}\n"
+
+        frame = (
+            "\033[H"   # cursor home
+            f"\n"
+            f"  {_BD}{_WH}ROVER {ROVER_ID}{_R}  "
+            f"{armed_s}  {mode_s}  SEL: {sel_s}\n"
+            f"{sep}"
+            f"  SBUS  {sbus_s}        HB  {hb_s}\n"
+            f"  THR   {thr_s}         STR {str_s}\n"
+            f"{sep}"
+            f"  GPS   {fix_s}   sats={sats_s}   acc={acc_s}\n"
+            f"  pos   {_WH}{s.lat:.7f}{_R}, {_WH}{s.lon:.7f}{_R}\n"
+            f"  hdg   {_CY}{s.heading_deg:.1f}°{_R}   "
+            f"alt={_WH}{s.alt_m:.1f}m{_R}   "
+            f"baseline={_DM}{s.baseline_m:.2f}m{_R}\n"
+            f"{sep}"
+            f"  TANK  {tank_s}   TEMP {temp_s}   HUMID {humid_s}   "
+            f"PRES {_WH}{s.pressure_hpa:.1f}hPa{_R}\n"
+            f"  {_DM}{time.strftime('%H:%M:%S')}  "
+            f"GCS {GCS_HOST}:{GCS_PORT}  sysid={MAV_SYSTEM_ID}{_R}\n"
+            "\033[J"   # clear to end of screen
         )
+
+        sys.stdout.write(frame)
+        sys.stdout.flush()
         time.sleep(0.2)
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -666,7 +752,7 @@ def main() -> None:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
-        print("\n[RV{ROVER_ID}] Shutting down…")
+        print(f"\n[RV{ROVER_ID}] Shutting down…")
     finally:
         gps.stop()
         uart.close()
