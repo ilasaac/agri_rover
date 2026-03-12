@@ -415,8 +415,8 @@ class UartEmulator:
 
     def _update_physics(self, ch: list[int]) -> None:
         """Apply rover-selection + mode gating then call physics.set_ppm."""
-        swa       = ch[4]
-        swb       = ch[5]
+        swa       = ch[2]   # SWA = ppm_channels[2] (emergency stop switch)
+        swb       = ch[3]   # SWB = ppm_channels[3] (autonomous mode switch)
         rover_sel = ch[8] if len(ch) > 8 else 1000
         is_emergency  = swa < self._EMERGENCY_THRESHOLD
         is_autonomous = (not is_emergency) and (swb > self._AUTONOMOUS_THRESHOLD)
