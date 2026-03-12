@@ -31,8 +31,10 @@ Environment variables (override defaults):
 
 from __future__ import annotations
 
+import argparse
 import math
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -814,9 +816,90 @@ def _status_loop() -> None:
         sys.stdout.flush()
         time.sleep(0.2)
 
+# ─── Simulator launcher helpers ───────────────────────────────────────────────
+
+def _drain_proc(proc: subprocess.Popen) -> None:
+    try:
+        for _ in proc.stdout:
+            pass
+    except Exception:
+        pass
+
+
+def _launch_sim_gps(rover_id: int, real_port: str) -> None:
+    """Launch simulator/sim.py and update GPS (and UART for RV1 proxy) port globals."""
+    global UART_PORT, GPS_PRIMARY_PORT, GPS_SECONDARY_PORT
+
+    mode   = "proxy" if rover_id == 1 else "emulate"
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "simulator", "sim.py")
+    cmd    = [sys.executable, script, "--rover", str(rover_id), "--mode", mode]
+    if mode == "proxy":
+        cmd += ["--real-port", real_port]
+
+    print(f"[SIM] Starting GPS simulator (rover={rover_id}, mode={mode})…")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
+
+    needed: set[str] = ({"UART_PORT", "GPS_PRIMARY_PORT", "GPS_SECONDARY_PORT"}
+                        if rover_id == 1 else {"GPS_PRIMARY_PORT", "GPS_SECONDARY_PORT"})
+    found:  dict[str, str] = {}
+    for line in proc.stdout:
+        stripped = line.strip().rstrip(" \\")
+        for key in needed:
+            if stripped.startswith(key + "="):
+                found[key] = stripped.split("=", 1)[1]
+                print(f"[SIM]   {key}={found[key]}")
+        if needed <= found.keys():
+            break
+
+    if "UART_PORT" in found:
+        UART_PORT = found["UART_PORT"]
+    GPS_PRIMARY_PORT   = found["GPS_PRIMARY_PORT"]
+    GPS_SECONDARY_PORT = found["GPS_SECONDARY_PORT"]
+
+    threading.Thread(target=_drain_proc, args=(proc,), daemon=True, name="sim-drain").start()
+
+
+def _launch_sim_rc(listen_port: int) -> None:
+    """Launch tools/rp2040_emulator.py and update UART_PORT global."""
+    global UART_PORT
+
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                          "..", "tools", "rp2040_emulator.py")
+    cmd = [sys.executable, script,
+           "--listen-port", str(listen_port), "--master-sysid", "1"]
+
+    print(f"[EMU] Starting RP2040 emulator (listen_port={listen_port})…")
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, bufsize=1)
+
+    for line in proc.stdout:
+        if "Virtual pty" in line and ":" in line:
+            UART_PORT = line.rsplit(":", 1)[-1].strip()
+            print(f"[EMU]   UART_PORT={UART_PORT}")
+            break
+
+    threading.Thread(target=_drain_proc, args=(proc,), daemon=True, name="emu-drain").start()
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=f"Agri Rover controller")
+    parser.add_argument("--sim-gps", action="store_true",
+                        help="Launch GPS simulator subprocess (sim.py)")
+    parser.add_argument("--sim-rc", action="store_true",
+                        help="Launch RP2040 emulator for simulated RC link (Rover 2)")
+    parser.add_argument("--real-port", default=UART_PORT,
+                        help=f"Real RP2040 serial port for Rover 1 proxy mode (default: {UART_PORT})")
+    args = parser.parse_args()
+
+    if args.sim_gps:
+        _launch_sim_gps(ROVER_ID, args.real_port)
+    if args.sim_rc:
+        _launch_sim_rc(14550)   # always listen for RV1's MAVLink on 14550
+
     print(f"[RV{ROVER_ID}] Starting rover controller")
     print(f"  UART:        {UART_PORT}:{UART_BAUD}")
     print(f"  GPS primary: {GPS_PRIMARY_PORT}  secondary: {GPS_SECONDARY_PORT}")
