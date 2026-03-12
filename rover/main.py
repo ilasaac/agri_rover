@@ -254,8 +254,9 @@ class UARTBridge:
 
             # Gate throttle/steering by rover selection (CH9)
             # CH9 ≤ 1250 → RV1 only;  1250 < CH9 ≤ 1750 → RV2 only;  CH9 > 1750 → both
+            # AUTO mode: joystick blocked — autonomous script sends commands directly
             if is_autonomous:
-                active = True
+                active = False
             elif is_emergency:
                 active = False
             elif ROVER_ID == 1:
@@ -489,13 +490,14 @@ class MAVLink:
         if not self._mav:
             return
         with state_lock:
-            ch = list(state.ppm_channels)   # 8 channels
-            ch9 = state.rover_select        # CH9 rover selection
-        ch9_entry = [ch9]
-        all_ch = (ch + ch9_entry + [65535] * (18 - 9))
+            # Broadcast raw (unmodified) channels so rover 2 can apply its own gating.
+            # rc_channels is 9 entries: CH1-CH8 from sticks + CH9 rover selection.
+            raw = list(state.rc_channels)
+        n = len(raw)
+        all_ch = (raw + [65535] * (18 - n))
         self._mav.mav.rc_channels_send(
             int(time.monotonic() * 1000) & 0xFFFFFFFF,
-            9,   # chancount includes CH9
+            n,
             all_ch[0],  all_ch[1],  all_ch[2],  all_ch[3],
             all_ch[4],  all_ch[5],  all_ch[6],  all_ch[7],
             all_ch[8],  all_ch[9],  all_ch[10], all_ch[11],
@@ -582,8 +584,9 @@ class MAVLink:
         with state_lock:
             rover_sel = state.rover_select
 
+        # AUTO mode: joystick blocked — autonomous script sends commands directly
         if is_autonomous:
-            active = True
+            active = False
         elif is_emergency:
             active = False
         elif ROVER_ID == 1:
@@ -598,6 +601,8 @@ class MAVLink:
 
         uart.send_ppm(effective)
         with state_lock:
+            # Store raw 9-ch (override channels + CH9 from UART) for relay to rover 2
+            state.rc_channels   = list(ch) + [rover_sel]
             state.ppm_channels  = effective
             state.is_emergency  = is_emergency
             state.is_autonomous = is_autonomous
