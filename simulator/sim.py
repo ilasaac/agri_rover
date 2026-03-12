@@ -451,11 +451,12 @@ def main() -> None:
                      daemon=True, name="state-writer").start()
 
     print(f"\n=== Agri Rover Simulator  (Rover {args.rover}, mode={args.mode}) ===")
-    print(f"\nSet these environment variables before starting rover/main.py:\n")
+    print(f"\nRun rover/main.py in a second terminal:\n")
     print(f"  ROVER_ID={args.rover} \\")
     print(f"  UART_PORT={uart_iface.pty_path} \\")
     print(f"  GPS_PRIMARY_PORT={gps_writer.primary_path} \\")
     print(f"  GPS_SECONDARY_PORT={gps_writer.secondary_path} \\")
+    print(f"  GCS_HOST=192.168.144.255 \\")
     print(f"  python rover/main.py\n")
 
     # Live display

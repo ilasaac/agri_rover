@@ -60,6 +60,7 @@ _last_rx  = 0.0   # monotonic time of last RC_CHANNELS received
 
 def _mav_listener(port: int, master_sysid: int) -> None:
     global _last_rx
+    import socket as _socket
     while True:
         try:
             mav = mavutil.mavlink_connection(f"udpin:0.0.0.0:{port}")
@@ -70,7 +71,10 @@ def _mav_listener(port: int, master_sysid: int) -> None:
                     pass
             print(f"[EMU] Listening for master (sysid={master_sysid}) on UDP:{port}")
             while True:
-                msg = mav.recv_msg()
+                try:
+                    msg = mav.recv_msg()
+                except _socket.timeout:
+                    continue   # no data yet — keep waiting
                 if msg is None:
                     continue
                 if msg.get_srcSystem() != master_sysid:
