@@ -192,7 +192,8 @@ def _dispatch(rover_id: int, msg) -> None:
             s.last_rc = now
 
         elif t == "NAMED_VALUE_FLOAT":
-            name = msg.name.decode("ascii", errors="ignore").rstrip("\x00")
+            raw_name = msg.name
+            name = (raw_name.decode("ascii", errors="ignore") if isinstance(raw_name, bytes) else raw_name).rstrip("\x00")
             val  = msg.value
             if name == "TANK":
                 s.tank_pct    = val
@@ -216,8 +217,9 @@ def _dispatch(rover_id: int, msg) -> None:
             s.last_wp = now
 
         elif t == "STATUSTEXT":
-            sev  = msg.severity
-            text = msg.text.decode("ascii", errors="ignore").rstrip("\x00")
+            sev      = msg.severity
+            raw_text = msg.text
+            text     = (raw_text.decode("ascii", errors="ignore") if isinstance(raw_text, bytes) else raw_text).rstrip("\x00")
             s.status_log.append((now, sev, text))
             if len(s.status_log) > 20:
                 s.status_log = s.status_log[-20:]
@@ -383,9 +385,10 @@ def _display_loop() -> None:
             dist = _haversine(s1.lat, s1.lon, s2.lat, s2.lon)
             out.append(f"  {BOLD}Rover separation:{RESET}  {dist:.2f} m\n")
 
-        # Move cursor to top and redraw
+        # Move cursor to top, redraw, then clear any stale lines below
         print("\033[H", end="")
-        print("\n".join(out), flush=True)
+        print("\n".join(out), end="", flush=True)
+        print("\033[J", end="", flush=True)   # clear to end of screen
 
         time.sleep(0.25)
 

@@ -428,7 +428,7 @@ class MAVLink:
         base_mode = 0x01  # MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
         if armed:
             base_mode |= 0x80
-        custom_mode = 4 if auto else 0   # AUTO=4, MANUAL=0
+        custom_mode = 10 if auto else 0   # AUTO=10, MANUAL=0  (ArduRover modes)
         self._mav.mav.heartbeat_send(
             MAV_TYPE, MAV_AUTOPILOT, base_mode, custom_mode, 4
         )
@@ -466,17 +466,43 @@ class MAVLink:
         if not self._mav:
             return
         with state_lock:
-            ch = list(state.ppm_channels)
-        ch += [65535] * (18 - len(ch))
+            ch = list(state.ppm_channels)   # 8 channels
+            ch9 = state.rover_select        # CH9 rover selection
+        ch9_entry = [ch9]
+        all_ch = (ch + ch9_entry + [65535] * (18 - 9))
         self._mav.mav.rc_channels_send(
             int(time.monotonic() * 1000) & 0xFFFFFFFF,
-            len(state.ppm_channels),
-            ch[0],  ch[1],  ch[2],  ch[3],
-            ch[4],  ch[5],  ch[6],  ch[7],
-            ch[8],  ch[9],  ch[10], ch[11],
-            ch[12], ch[13], ch[14], ch[15],
-            ch[16], ch[17],
+            9,   # chancount includes CH9
+            all_ch[0],  all_ch[1],  all_ch[2],  all_ch[3],
+            all_ch[4],  all_ch[5],  all_ch[6],  all_ch[7],
+            all_ch[8],  all_ch[9],  all_ch[10], all_ch[11],
+            all_ch[12], all_ch[13], all_ch[14], all_ch[15],
+            all_ch[16], all_ch[17],
             255,
+        )
+
+    def send_gps_raw(self) -> None:
+        if not self._mav:
+            return
+        with state_lock:
+            fix  = state.fix_quality
+            sats = state.num_sats
+            lat  = state.lat
+            lon  = state.lon
+            alt  = state.alt_m
+            acc  = state.h_accuracy_m
+        eph = int(acc * 100) if acc < 655 else 65535
+        self._mav.mav.gps_raw_int_send(
+            int(time.monotonic() * 1000) & 0xFFFFFFFF,
+            fix,
+            int(lat * 1e7),
+            int(lon * 1e7),
+            int(alt * 1000),
+            eph,
+            65535,   # epv unknown
+            65535,   # vel unknown
+            65535,   # cog unknown
+            sats,
         )
 
     def send_named_float(self, name: str, value: float) -> None:
@@ -585,6 +611,7 @@ def _telemetry_loop() -> None:
 
         if now - t_pos >= 1.0 / HZ_POSITION:
             mav.send_global_position()
+            mav.send_gps_raw()
             t_pos = now
 
         if now - t_rc >= 1.0 / HZ_RC:
