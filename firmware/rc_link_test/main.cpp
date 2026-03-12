@@ -11,7 +11,10 @@
 #define PIN_CE   8
 
 // CRITICAL: Set to 1 for the Sender (RP2040 #1) and 0 for the Responder (RP2040 #2)
+// Allow CMake to define IS_INITIATOR. If it doesn't, default to 1.
+#ifndef IS_INITIATOR
 #define IS_INITIATOR 1
+#endif
 
 // Instantiate the radio
 RF24 radio(PIN_CE, PIN_CSN);
