@@ -1,4 +1,7 @@
 emitter/build/
 receiver/build/
 rc_link_test/build/
+<<<<<<< HEAD
 rc_link_test/RF24/
+=======
+>>>>>>> 8fdb5309e6227a2e152d22eb19c8a0f35c249915
