@@ -53,8 +53,13 @@ def ppm_bar(val: int, width: int = 12) -> str:
     return f"{col}{bar}{RESET} {val:4d}"
 
 
-def render(channels: list[int], mode: str, sbus: str, hb_age: float | None) -> None:
-    lines = []
+def ppm_blank(width: int = 12) -> str:
+    return f"{DIM}{'─' * width}{RESET}  ---"
+
+
+def render(channels: list[int], mode: str, sbus: str, hb_age: float | None,
+           log: list[str]) -> None:
+    out = ["\033[H"]   # cursor home (no clear = no flicker)
 
     # Header
     hb_str = f"{hb_age:.1f}s" if hb_age is not None else "---"
@@ -69,57 +74,72 @@ def render(channels: list[int], mode: str, sbus: str, hb_age: float | None) -> N
 
     sbus_col = GREEN if sbus == "OK" else (RED if sbus == "LOST" else DIM)
 
-    lines.append(
-        f"\033[H"   # cursor home
+    out.append(
         f"\n  {BOLD}RP2040 UART Monitor{RESET}  "
-        f"port={PORT}  baud={BAUD}\n"
+        f"port={PORT}  baud={BAUD}                    \n"
         f"  Mode: {mode_col}{BOLD}{mode}{RESET}  "
         f"SBUS: {sbus_col}{sbus}{RESET}  "
-        f"HB: {hb_col}{hb_str}{RESET}\n"
-        f"  {'─'*54}\n"
+        f"HB: {hb_col}{hb_str}{RESET}              \n"
+        f"  {'─'*60}\n"
     )
 
-    # Channels in two columns
-    n = max(len(channels), 8)
-    for i in range(0, n, 2):
-        left_name  = CH_NAMES[i]   if i   < len(CH_NAMES) else f"CH{i+1}"
-        right_name = CH_NAMES[i+1] if i+1 < len(CH_NAMES) else f"CH{i+2}"
-        left_val   = channels[i]   if i   < len(channels) else 0
-        right_val  = channels[i+1] if i+1 < len(channels) else 0
-
-        left_bar  = ppm_bar(left_val)
-        right_bar = ppm_bar(right_val)
-
-        lines.append(
+    # Always show 16 channels in two columns (8 rows)
+    for i in range(0, 16, 2):
+        left_name  = CH_NAMES[i]
+        right_name = CH_NAMES[i + 1]
+        left_has   = i     < len(channels)
+        right_has  = i + 1 < len(channels)
+        left_bar   = ppm_bar(channels[i])     if left_has  else ppm_blank()
+        right_bar  = ppm_bar(channels[i + 1]) if right_has else ppm_blank()
+        out.append(
             f"  {left_name:>4}  {left_bar}    "
-            f"{right_name:>4}  {right_bar}"
+            f"{right_name:>4}  {right_bar}    \n"
         )
 
-    # Raw line
+    # Raw line (fixed width, pad to overwrite longer previous content)
     raw = ",".join(str(v) for v in channels)
-    lines.append(f"\n  {DIM}raw: {raw}{RESET}")
-    lines.append(f"  {DIM}last update: {time.strftime('%H:%M:%S')}{RESET}\n")
+    out.append(f"\n  {DIM}raw: {raw:<80}{RESET}\n")
+    out.append(f"  {DIM}last update: {time.strftime('%H:%M:%S')}{RESET}    \n")
 
-    print("\n".join(lines), end="", flush=True)
+    # Event log (last 6 lines, fixed height)
+    out.append(f"  {'─'*60}\n  {DIM}events:{RESET}\n")
+    for entry in log[-6:]:
+        out.append(f"  {DIM}{entry:<70}{RESET}\n")
+    # Pad to fixed height so old lines are overwritten
+    for _ in range(6 - min(len(log), 6)):
+        out.append(f"  {' ' * 70}\n")
+
+    # Clear to end of screen (removes any leftover lines from prior renders)
+    out.append("\033[J")
+
+    sys.stdout.write("".join(out))
+    sys.stdout.flush()
 
 
 def main() -> None:
-    channels: list[int] = [1500] * 8
-    mode     = "---"
-    sbus     = "---"
-    hb_counter  = -1
+    channels: list[int] = []
+    mode        = "---"
+    sbus        = "---"
     hb_last_rx  = None
     hb_expected = -1
+    hb_counter  = 0
+    log: list[str] = []
 
-    print(f"\033[2J")   # clear screen
-    print(f"Connecting to {PORT} at {BAUD} baud…")
+    def add_log(msg: str) -> None:
+        ts = time.strftime("%H:%M:%S")
+        log.append(f"{ts}  {msg}")
+
+    sys.stdout.write("\033[2J")   # clear screen once
+    sys.stdout.flush()
+    add_log(f"Connecting to {PORT} at {BAUD} baud…")
+    render(channels, mode, sbus, None, log)
 
     while True:
         try:
             ser = serial.Serial(PORT, BAUD, timeout=0.1)
             ser.reset_input_buffer()
-            print(f"\033[2J")   # clear on connect
-            render(channels, mode, sbus, None)
+            add_log(f"Connected to {PORT}")
+            render(channels, mode, sbus, None, log)
 
             while True:
                 raw = ser.readline()
@@ -138,18 +158,21 @@ def main() -> None:
                     try:
                         vals = [int(v) for v in body.split(",")]
                         if len(vals) >= 2:
-                            channels = vals
-                            mode = mode_part.strip()
-                            hb_age = (time.time() - hb_last_rx) if hb_last_rx else None
-                            render(channels, mode, sbus, hb_age)
+                            channels  = vals
+                            mode      = mode_part.strip()
+                            hb_age    = (time.time() - hb_last_rx) if hb_last_rx else None
+                            render(channels, mode, sbus, hb_age, log)
                     except ValueError:
                         pass
 
                 # ── Status messages ────────────────────────────────────────
                 elif line in ("[SBUS_OK]", "[FAILSAFE_CLEARED]", "[RF_LINK_OK]"):
                     sbus = "OK"
-                elif line in ("[SBUS_LOST]", "[FAILSAFE]", "[RF_LINK_LOST]"):
+                    add_log(line)
+                elif line in ("[SBUS_LOST]", "[FAILSAFE]", "[RF_LINK_LOST]",
+                              "[FRAME_LOST]"):
                     sbus = "LOST"
+                    add_log(line)
 
                 # ── Heartbeat echo ─────────────────────────────────────────
                 elif line.startswith("<HB:") and line.endswith(">"):
@@ -160,15 +183,19 @@ def main() -> None:
                     except ValueError:
                         pass
 
-                # ── Anything else — print below the display ────────────────
+                # ── Anything else → event log ──────────────────────────────
                 else:
-                    print(f"\n  {DIM}>> {line}{RESET}", flush=True)
+                    add_log(f">> {line}")
+                    hb_age = (time.time() - hb_last_rx) if hb_last_rx else None
+                    render(channels, mode, sbus, hb_age, log)
 
         except serial.SerialException as exc:
-            print(f"\r[UART] {exc} — retry in 2 s   ", end="", flush=True)
+            add_log(f"SerialException: {exc} — retry in 2 s")
+            render(channels, mode, sbus, None, log)
             time.sleep(2.0)
         except KeyboardInterrupt:
-            print("\nBye.")
+            sys.stdout.write("\n\033[?25h")   # restore cursor
+            print("Bye.")
             break
 
 
