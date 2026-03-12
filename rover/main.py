@@ -222,21 +222,20 @@ class UARTBridge:
 
     def _recv_loop(self) -> None:
         _log_path = f"/tmp/rv{ROVER_ID}_uart.log"
-        _log_lines = 0
-        _log_max   = 50   # capture first 50 lines then stop logging
         while self._running:
             try:
                 raw = self._ser.readline()
                 if raw:
                     line = raw.decode("utf-8", errors="ignore").strip()
                     if line:
-                        if _log_lines < _log_max:
-                            try:
+                        try:
+                            # Write while file is under 8 KB; recreates after deletion
+                            if not os.path.exists(_log_path) or \
+                                    os.path.getsize(_log_path) < 8192:
                                 with open(_log_path, "a") as _f:
                                     _f.write(line + "\n")
-                                _log_lines += 1
-                            except Exception:
-                                pass
+                        except Exception:
+                            pass
                         self._parse_line(line)
             except Exception:
                 time.sleep(0.01)
