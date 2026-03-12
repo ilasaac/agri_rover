@@ -457,6 +457,7 @@ class MAVLink:
         self._running   = False
         self._lock      = threading.Lock()
         self._gcs_addr  = None   # (ip, port) — discovered from incoming GCS heartbeat
+        self.relay_tx   = 0      # count of RC_CHANNELS packets relayed to RV2
 
     def connect(self) -> None:
         import socket as _socket
@@ -573,6 +574,7 @@ class MAVLink:
         if self._relay_mav:
             try:
                 self._relay_mav.mav.rc_channels_send(*_args)
+                self.relay_tx += 1
             except Exception:
                 pass
 
@@ -904,6 +906,9 @@ def _status_loop() -> None:
             f"  {_DM}{time.strftime('%H:%M:%S')}  "
             f"GCS {mav._gcs_addr[0] if mav._gcs_addr else 'discovering…'}  "
             f"sysid={MAV_SYSTEM_ID}{_R}\r\n"
+            f"  {_DM}relay → "
+            f"{(RELAY_HOST + ':' + str(RELAY_PORT) + '  tx=' + str(mav.relay_tx)) if RELAY_HOST else _c('NOT CONFIGURED  (--relay-host missing)', _RD)}"
+            f"{_R}\r\n"
             "\033[J"   # clear to end of screen
         )
 
@@ -914,8 +919,11 @@ def _status_loop() -> None:
 # ─── Simulator launcher helpers ───────────────────────────────────────────────
 
 def _drain_proc(proc: subprocess.Popen) -> None:
+    # Read in raw binary chunks — sim.py's live display uses \r without \n so
+    # a line-by-line reader would block forever and let the 64 KB pipe fill up,
+    # eventually hanging sim.py's main thread.
     try:
-        for _ in proc.stdout:
+        while proc.stdout.buffer.read(4096):
             pass
     except Exception:
         pass

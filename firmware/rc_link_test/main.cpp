@@ -35,13 +35,12 @@ int main() {
     }
     printf("=================================\n");
 
-    // --- CRITICAL FIX: Explicitly route the SPI pins ---
+    // --- Explicitly route the SPI pins ---
     // Initialize SPI0 at 1 MHz (A very stable, conservative speed for testing)
     spi_init(spi0, 1000000);
     gpio_set_function(PIN_MISO, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SCK,  GPIO_FUNC_SPI);
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
-    // Note: CE and CSN are standard GPIOs, so the RF24 library handles them.
 
     // Try to initialize the radio
     bool radio_ok = radio.begin();
@@ -50,8 +49,12 @@ int main() {
         printf("ERROR: nRF24L01 not found! Check wiring.\n");
     } else {
         printf("SUCCESS: nRF24L01 found and initialized.\n");
-        radio.setPALevel(RF24_PA_LOW);
-        radio.setPayloadSize(sizeof(uint32_t));
+        
+        // --- NEW RF BULLETPROOFING ---
+        radio.setPALevel(RF24_PA_MIN);    // Prevents receiver overload when boards are close
+        radio.setDataRate(RF24_1MBPS);    // A slower, more reliable data rate
+        radio.setChannel(76);             // Shifts the frequency to avoid Wi-Fi interference
+        radio.setPayloadSize(sizeof(uint32_t)); 
 
         if (IS_INITIATOR) {
             radio.openWritingPipe(address[0]);
