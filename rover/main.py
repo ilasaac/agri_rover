@@ -890,8 +890,8 @@ def _launch_sim_gps(rover_id: int, real_port: str, gcs_host: str) -> None:
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                             text=True, bufsize=1)
 
-    needed: set[str] = ({"UART_PORT", "GPS_PRIMARY_PORT", "GPS_SECONDARY_PORT"}
-                        if rover_id == 1 else {"GPS_PRIMARY_PORT", "GPS_SECONDARY_PORT"})
+    # sim.py always prints UART_PORT (UartProxy or UartEmulator pty)
+    needed: set[str] = {"UART_PORT", "GPS_PRIMARY_PORT", "GPS_SECONDARY_PORT"}
     found:  dict[str, str] = {}
     for line in proc.stdout:
         stripped = line.strip().rstrip(" \\")
@@ -902,10 +902,9 @@ def _launch_sim_gps(rover_id: int, real_port: str, gcs_host: str) -> None:
         if needed <= found.keys():
             break
 
-    if "UART_PORT" in found:
-        UART_PORT = found["UART_PORT"]
-    GPS_PRIMARY_PORT   = found["GPS_PRIMARY_PORT"]
-    GPS_SECONDARY_PORT = found["GPS_SECONDARY_PORT"]
+    UART_PORT          = found.get("UART_PORT",          UART_PORT)
+    GPS_PRIMARY_PORT   = found.get("GPS_PRIMARY_PORT",   GPS_PRIMARY_PORT)
+    GPS_SECONDARY_PORT = found.get("GPS_SECONDARY_PORT", GPS_SECONDARY_PORT)
 
     threading.Thread(target=_drain_proc, args=(proc,), daemon=True, name="sim-drain").start()
 
@@ -956,7 +955,10 @@ def main() -> None:
 
     if args.sim_gps:
         _launch_sim_gps(ROVER_ID, args.real_port, GCS_HOST)
-    if args.sim_rc:
+    # --sim-rc is redundant when --sim-gps is used for RV2 (sim.py emulate mode
+    # now embeds the MAVLink RC listener).  Only launch the standalone emulator
+    # when sim-gps is NOT active (e.g. real GPS but simulated RC link).
+    if args.sim_rc and not args.sim_gps:
         _launch_sim_rc(14550)   # always listen for RV1's MAVLink on 14550
 
     print(f"[RV{ROVER_ID}] Starting rover controller")

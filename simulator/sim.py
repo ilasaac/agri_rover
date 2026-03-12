@@ -44,6 +44,11 @@ try:
 except ImportError:
     raise ImportError("pip install pyserial")
 
+try:
+    from pymavlink import mavutil as _mavutil
+except ImportError:
+    _mavutil = None  # type: ignore
+
 # ─── Physics ──────────────────────────────────────────────────────────────────
 
 class UnicyclePhysics:
@@ -228,9 +233,16 @@ class UartProxy:
     Sniffs CH: lines from the RP2040 to extract PPM for physics.
     """
 
-    def __init__(self, real_port: str, physics: UnicyclePhysics):
+    # Mirror the selection constants from rover/main.py
+    _EMERGENCY_THRESHOLD  = 1700
+    _AUTONOMOUS_THRESHOLD = 1700
+    _ROVER_SELECT_LOW     = 1250
+    _ROVER_SELECT_HIGH    = 1750
+
+    def __init__(self, real_port: str, physics: UnicyclePhysics, rover_id: int = 1):
         self._real_port = real_port
         self._physics   = physics
+        self._rover_id  = rover_id
         self._running   = False
         self.pty_path:  str = ""
         self._mfd:      int = -1
@@ -264,15 +276,13 @@ class UartProxy:
                             line, buf = buf.split(b"\n", 1)
                             self._sniff_ch(line.decode("utf-8", errors="ignore").strip())
 
-                    # main.py → RP2040: also drive physics from outgoing PPM
-                    # commands so mode gating (AUTO/EMERGENCY) is respected.
+                    # main.py → RP2040
                     rlist, _, _ = select.select([self._mfd], [], [], 0)
                     if rlist:
                         try:
                             data = os.read(self._mfd, 256)
                             if data:
                                 ser.write(data)
-                                self._sniff_cmd(data)
                         except OSError:
                             pass
 
@@ -284,37 +294,32 @@ class UartProxy:
                     ser.close()
 
     def _sniff_ch(self, line: str) -> None:
-        """Sniff CH: lines from RP2040 — only used to update rover_select (CH9).
-        Physics is now driven by outgoing PPM commands (_sniff_cmd) so that
-        mode gating in rover/main.py is reflected in the simulation."""
-        if line.startswith("CH:"):
-            try:
-                ch_part = line[3:].split(" MODE:")[0]
-                vals = [int(v) for v in ch_part.split(",")]
-                # CH9 rover-select kept for reference but physics comes from cmd
-                _ = vals
-            except ValueError:
-                pass
-
-    def _sniff_cmd(self, data: bytes) -> None:
-        """Parse PPM packets sent by rover/main.py to the RP2040 and use them
-        to drive physics.  Packets are already gated by mode/selection, so
-        physics stays still in AUTO or EMERGENCY modes."""
+        """Sniff CH: lines from RP2040, apply rover-selection + mode gating,
+        then drive physics.  Mirrors the gating logic in rover/main.py
+        _parse_channels so the sim stays still when the rover is not selected."""
+        if not line.startswith("CH:"):
+            return
         try:
-            text = data.decode("utf-8", errors="ignore")
-            for pkt in text.replace("<", "\x00<").split("\x00"):
-                pkt = pkt.strip()
-                if not (pkt.startswith("<") and pkt.endswith(">")):
-                    continue
-                inner = pkt[1:-1]
-                if inner.startswith("HB:"):
-                    continue
-                if inner.startswith("J:"):
-                    inner = inner[2:]
-                vals = [int(v) for v in inner.split(",")]
-                if len(vals) >= 2:
-                    self._physics.set_ppm(vals[0], vals[1])
-        except Exception:
+            ch_part = line[3:].split(" MODE:")[0]
+            vals = [int(v) for v in ch_part.split(",")]
+            if len(vals) < 8:
+                return
+            swa       = vals[4]   # CH5 — emergency stop
+            swb       = vals[5]   # CH6 — autonomous mode
+            rover_sel = vals[8] if len(vals) > 8 else 1000  # CH9
+            is_emergency  = swa < self._EMERGENCY_THRESHOLD
+            is_autonomous = (not is_emergency) and (swb > self._AUTONOMOUS_THRESHOLD)
+            if is_autonomous or is_emergency:
+                active = False
+            elif self._rover_id == 1:
+                active = (rover_sel <= self._ROVER_SELECT_LOW) or (rover_sel > self._ROVER_SELECT_HIGH)
+            else:
+                active = rover_sel > self._ROVER_SELECT_LOW
+            if active:
+                self._physics.set_ppm(vals[0], vals[1])
+            else:
+                self._physics.set_ppm(1500, 1500)
+        except (ValueError, IndexError):
             pass
 
 
@@ -325,15 +330,33 @@ class UartEmulator:
     No real RP2040.  Provides a pty that main.py can connect to.
     Parses PPM commands from main.py; drives physics.
     Sends synthetic CH: lines back to main.py.
+
+    For rover_id==2: also listens on UDP (listen_port) for RC_CHANNELS
+    MAVLink packets from the master rover (sysid=1) and uses them to
+    drive physics and produce accurate CH: output — replacing the need
+    for a separate rp2040_emulator process.
     """
 
-    def __init__(self, physics: UnicyclePhysics):
-        self._physics = physics
-        self._running = False
-        self.pty_path: str = ""
-        self._mfd:     int = -1
-        self._thr      = 1500
-        self._str      = 1500
+    _EMERGENCY_THRESHOLD  = 1700
+    _AUTONOMOUS_THRESHOLD = 1700
+    _ROVER_SELECT_LOW     = 1250
+    _ROVER_SELECT_HIGH    = 1750
+    _LINK_TIMEOUT_S       = 0.5
+
+    def __init__(self, physics: UnicyclePhysics, rover_id: int = 1,
+                 listen_port: int = 14550):
+        self._physics     = physics
+        self._rover_id    = rover_id
+        self._listen_port = listen_port
+        self._running     = False
+        self.pty_path:    str = ""
+        self._mfd:        int = -1
+        self._thr         = 1500
+        self._str         = 1500
+        # Full 9-channel array (updated by MAVLink listener for RV2)
+        self._ch:    list[int]  = [1500] * 9
+        self._ch_lock            = threading.Lock()
+        self._last_rx: float    = 0.0
 
     def start(self) -> None:
         mfd, sfd, self.pty_path = open_pty()
@@ -342,9 +365,74 @@ class UartEmulator:
         self._running = True
         threading.Thread(target=self._recv_loop, daemon=True, name="emu-recv").start()
         threading.Thread(target=self._send_loop, daemon=True, name="emu-send").start()
+        if self._rover_id == 2:
+            threading.Thread(target=self._mav_listener, daemon=True,
+                             name="emu-mav").start()
 
     def stop(self) -> None:
         self._running = False
+
+    # ── MAVLink RC listener (RV2 only) ────────────────────────────────────────
+
+    def _mav_listener(self) -> None:
+        """Listen for RC_CHANNELS from master rover (sysid=1) on UDP and
+        update _ch + physics.  Mirrors rp2040_emulator behaviour."""
+        if _mavutil is None:
+            print("[EMU] pymavlink not available — RC listener disabled")
+            return
+        import socket as _socket
+        print(f"[EMU] RV2 RC listener on UDP:{self._listen_port} (master sysid=1)")
+        while self._running:
+            try:
+                mav = _mavutil.mavlink_connection(f"udpin:0.0.0.0:{self._listen_port}")
+                if hasattr(mav, "port") and hasattr(mav.port, "settimeout"):
+                    try:
+                        mav.port.settimeout(0.5)
+                    except Exception:
+                        pass
+                while self._running:
+                    try:
+                        msg = mav.recv_msg()
+                    except _socket.timeout:
+                        continue
+                    if msg is None:
+                        continue
+                    if msg.get_srcSystem() != 1:
+                        continue
+                    if msg.get_type() == "RC_CHANNELS":
+                        raw = [
+                            msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw,
+                            msg.chan5_raw, msg.chan6_raw, msg.chan7_raw, msg.chan8_raw,
+                            msg.chan9_raw,
+                        ]
+                        ch = [1500 if v == 65535 else v for v in raw]
+                        with self._ch_lock:
+                            self._ch = ch
+                        self._last_rx = time.monotonic()
+                        self._update_physics(ch)
+            except Exception as exc:
+                print(f"[EMU] MAV listener error: {exc} — retry in 2 s")
+                time.sleep(2.0)
+
+    def _update_physics(self, ch: list[int]) -> None:
+        """Apply rover-selection + mode gating then call physics.set_ppm."""
+        swa       = ch[4]
+        swb       = ch[5]
+        rover_sel = ch[8] if len(ch) > 8 else 1000
+        is_emergency  = swa < self._EMERGENCY_THRESHOLD
+        is_autonomous = (not is_emergency) and (swb > self._AUTONOMOUS_THRESHOLD)
+        if is_autonomous or is_emergency:
+            active = False
+        elif self._rover_id == 1:
+            active = (rover_sel <= self._ROVER_SELECT_LOW) or (rover_sel > self._ROVER_SELECT_HIGH)
+        else:
+            active = rover_sel > self._ROVER_SELECT_LOW
+        if active:
+            self._physics.set_ppm(ch[0], ch[1])
+        else:
+            self._physics.set_ppm(1500, 1500)
+
+    # ── PTY I/O ───────────────────────────────────────────────────────────────
 
     def _recv_loop(self) -> None:
         buf = b""
@@ -393,10 +481,30 @@ class UartEmulator:
                 pass
 
     def _send_loop(self) -> None:
+        link_ok = False
         while self._running:
-            thr = self._thr
-            steer = self._str
-            line = f"CH:{thr},{steer},2000,2000,2000,2000,1500,1500,1000\n"
+            if self._rover_id == 2:
+                # RV2: output full 9-channel data received from master via UDP
+                now      = time.monotonic()
+                rf_alive = (self._last_rx > 0) and (now - self._last_rx < self._LINK_TIMEOUT_S)
+                if rf_alive and not link_ok:
+                    link_ok = True
+                    try:
+                        os.write(self._mfd, b"[RF_LINK_OK]\n[SBUS_OK]\n")
+                    except OSError:
+                        pass
+                elif not rf_alive and link_ok:
+                    link_ok = False
+                    try:
+                        os.write(self._mfd, b"[RF_LINK_LOST]\n[SBUS_LOST]\n")
+                    except OSError:
+                        pass
+                with self._ch_lock:
+                    ch = list(self._ch)
+                line = "CH:" + ",".join(str(v) for v in ch) + " MODE:MANUAL\n"
+            else:
+                # RV1 emulate: echo back whatever PPM was commanded
+                line = f"CH:{self._thr},{self._str},2000,2000,2000,2000,1500,1500,1000\n"
             try:
                 os.write(self._mfd, line.encode())
             except OSError:
@@ -470,9 +578,9 @@ def main() -> None:
 
     # UART interface
     if args.mode == "proxy":
-        uart_iface = UartProxy(args.real_port, physics)
+        uart_iface = UartProxy(args.real_port, physics, rover_id=args.rover)
     else:
-        uart_iface = UartEmulator(physics)
+        uart_iface = UartEmulator(physics, rover_id=args.rover)
     uart_iface.start()
 
     # Background shared state writer
