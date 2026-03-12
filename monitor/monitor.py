@@ -403,11 +403,11 @@ def _haversine(lat1, lon1, lat2, lon2) -> float:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
+    global BIND_HOST
     parser = argparse.ArgumentParser(description="Agri Rover MAVLink Monitor")
     parser.add_argument("--host", default=BIND_HOST)
     args = parser.parse_args()
 
-    global BIND_HOST
     BIND_HOST = args.host
 
     for rover_id, port in ROVER_PORTS.items():
