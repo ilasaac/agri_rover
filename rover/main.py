@@ -552,6 +552,16 @@ class MAVLink:
         # Replace 0/65535 with center
         ch = [PPM_CENTER if v in (0, 65535) else v for v in ch]
         uart.send_ppm(ch)
+        # Update display — RC_CHANNELS_OVERRIDE is the active control source
+        # (SIYI HM30 sends this at 50 Hz from physical MK32 sticks)
+        swa = ch[CH_EMERGENCY]
+        swb = ch[CH_MODE]
+        is_emergency  = swa < EMERGENCY_THRESHOLD
+        is_autonomous = (not is_emergency) and (swb > AUTONOMOUS_THRESHOLD)
+        with state_lock:
+            state.ppm_channels  = list(ch)
+            state.is_emergency  = is_emergency
+            state.is_autonomous = is_autonomous
 
     def _handle_command(self, msg) -> None:
         cmd = msg.command
