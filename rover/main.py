@@ -43,6 +43,8 @@ from typing import Optional
 
 import serial
 
+os.environ['MAVLINK20'] = '1'   # force MAVLink v2 frames
+
 try:
     from pymavlink import mavutil
 except ImportError:
@@ -61,12 +63,12 @@ GPS_BAUD:             int = 115200
 
 # GCS (MK32 tablet via SIYI HM30 or direct UDP)
 GCS_HOST:             str = os.environ.get("GCS_HOST",             "127.0.0.1")
-GCS_PORT:             int = int(os.environ.get("GCS_PORT",         str(14549 + ROVER_ID)))  # RV1=14550, RV2=14551
+GCS_PORT:             int = int(os.environ.get("GCS_PORT",         "14550"))
 MAVLINK_BIND_PORT:    int = 14550 + (ROVER_ID - 1)   # rover1=14550, rover2=14551
 
 # Direct RC relay to RV2 machine (RV1 only) — avoids relying on WiFi broadcast
 RELAY_HOST:           str = os.environ.get("RELAY_HOST", "")   # RV2 machine IP
-RELAY_PORT:           int = 14550                               # rp2040_emulator listen port
+RELAY_PORT:           int = 14560                               # rp2040_emulator listen port (separate from GCS port 14550)
 
 # PPM / channel constants
 PPM_MIN    = 1000
@@ -445,25 +447,21 @@ class MAVLink:
         self._relay_mav = None   # second connection: RC relay direct to RV2 machine
         self._running   = False
         self._lock      = threading.Lock()
+        self._gcs_addr  = None   # (ip, port) — discovered from incoming GCS heartbeat
 
     def connect(self) -> None:
         import socket as _socket
 
-        conn = f"udpout:{GCS_HOST}:{GCS_PORT}"
+        # Bind to fixed port 14550 so the GCS can send RC_CHANNELS_OVERRIDE here,
+        # and so we receive the GCS heartbeat broadcast to learn its address dynamically.
         self._mav = mavutil.mavlink_connection(
-            conn,
+            "udpin:0.0.0.0:14550",
             source_system    = MAV_SYSTEM_ID,
             source_component = MAV_COMPONENT_ID,
         )
         if hasattr(self._mav, "port") and hasattr(self._mav.port, "settimeout"):
             try:
                 self._mav.port.settimeout(0.2)
-            except Exception:
-                pass
-        # Enable broadcast when GCS_HOST is a broadcast address
-        if GCS_HOST.endswith(".255"):
-            try:
-                self._mav.port.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
             except Exception:
                 pass
 
@@ -501,60 +499,59 @@ class MAVLink:
 
     # ── send ──────────────────────────────────────────────────────────────────
 
-    def send_heartbeat(self) -> None:
-        if not self._mav:
+    def _send(self, fn) -> None:
+        """Send MAVLink packet to GCS. No-op until a GCS heartbeat has been received."""
+        addr = self._gcs_addr
+        if addr is None or self._mav is None:
             return
+        try:
+            self._mav.last_address = addr
+            fn()
+        except Exception:
+            pass
+
+    def send_heartbeat(self) -> None:
         with state_lock:
-            armed  = state.is_armed
-            auto   = state.is_autonomous
-        base_mode = 0x01  # MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
-        if armed:
-            base_mode |= 0x80
-        custom_mode = 10 if auto else 0   # AUTO=10, MANUAL=0  (ArduRover modes)
-        self._mav.mav.heartbeat_send(
+            armed = state.is_armed
+            auto  = state.is_autonomous
+        base_mode   = 0x01 | (0x80 if armed else 0)
+        custom_mode = 10 if auto else 0
+        self._send(lambda: self._mav.mav.heartbeat_send(
             MAV_TYPE, MAV_AUTOPILOT, base_mode, custom_mode, 4
-        )
+        ))
 
     def send_sys_status(self) -> None:
-        if not self._mav:
-            return
         with state_lock:
             mv  = state.battery_mv
             pct = state.battery_pct
-        self._mav.mav.sys_status_send(
-            0, 0, 0, 0, mv, -1, pct,
-            0, 0, 0, 0, 0, 0
-        )
+        self._send(lambda: self._mav.mav.sys_status_send(
+            0, 0, 0, 0, mv, -1, pct, 0, 0, 0, 0, 0, 0
+        ))
 
     def send_global_position(self) -> None:
-        if not self._mav:
-            return
         with state_lock:
             lat = state.lat
             lon = state.lon
             alt = state.alt_m
             hdg = state.heading_deg
-        self._mav.mav.global_position_int_send(
-            int(time.monotonic() * 1000) & 0xFFFFFFFF,
-            int(lat * 1e7),
-            int(lon * 1e7),
-            int(alt * 1000),
-            int(alt * 1000),
-            0, 0, 0,
-            int(hdg * 100) % 36000,
-        )
+        if lat == 0.0 and lon == 0.0:
+            return
+        ts    = int(time.monotonic() * 1000) & 0xFFFFFFFF
+        lat_i = int(lat * 1e7)
+        lon_i = int(lon * 1e7)
+        alt_i = int(alt * 1000)
+        hdg_i = int(hdg * 100) % 36000
+        self._send(lambda: self._mav.mav.global_position_int_send(
+            ts, lat_i, lon_i, alt_i, alt_i, 0, 0, 0, hdg_i
+        ))
 
     def send_rc_channels(self) -> None:
-        if not self._mav:
-            return
         with state_lock:
-            # Broadcast raw (unmodified) channels so rover 2 can apply its own gating.
-            # rc_channels is 9 entries: CH1-CH8 from sticks + CH9 rover selection.
             raw = list(state.rc_channels)
-        n = len(raw)
-        all_ch = (raw + [65535] * (18 - n))
-        ts = int(time.monotonic() * 1000) & 0xFFFFFFFF
-        _args = (
+        n      = len(raw)
+        all_ch = raw + [65535] * (18 - n)
+        ts     = int(time.monotonic() * 1000) & 0xFFFFFFFF
+        _args  = (
             ts, n,
             all_ch[0],  all_ch[1],  all_ch[2],  all_ch[3],
             all_ch[4],  all_ch[5],  all_ch[6],  all_ch[7],
@@ -563,13 +560,11 @@ class MAVLink:
             all_ch[16], all_ch[17],
             255,
         )
-        self._mav.mav.rc_channels_send(*_args)
+        self._send(lambda: self._mav.mav.rc_channels_send(*_args))
         if self._relay_mav:
             self._relay_mav.mav.rc_channels_send(*_args)
 
     def send_gps_raw(self) -> None:
-        if not self._mav:
-            return
         with state_lock:
             fix  = state.fix_quality
             sats = state.num_sats
@@ -577,50 +572,62 @@ class MAVLink:
             lon  = state.lon
             alt  = state.alt_m
             acc  = state.h_accuracy_m
-        eph = int(acc * 100) if acc < 655 else 65535
-        self._mav.mav.gps_raw_int_send(
-            int(time.monotonic() * 1000) & 0xFFFFFFFF,
-            fix,
-            int(lat * 1e7),
-            int(lon * 1e7),
-            int(alt * 1000),
-            eph,
-            65535,   # epv unknown
-            65535,   # vel unknown
-            65535,   # cog unknown
-            sats,
-        )
+        eph   = int(acc * 100) if acc < 655 else 65535
+        ts    = int(time.monotonic() * 1000) & 0xFFFFFFFF
+        lat_i = int(lat * 1e7)
+        lon_i = int(lon * 1e7)
+        alt_i = int(alt * 1000)
+        self._send(lambda: self._mav.mav.gps_raw_int_send(
+            ts, fix, lat_i, lon_i, alt_i, eph, 65535, 65535, 65535, sats
+        ))
 
     def send_named_float(self, name: str, value: float) -> None:
-        if not self._mav:
-            return
         enc = name.encode("ascii", errors="replace")[:10].ljust(10, b"\x00")
-        self._mav.mav.named_value_float_send(
-            int(time.monotonic() * 1000) & 0xFFFFFFFF,
-            enc, float(value),
-        )
+        ts  = int(time.monotonic() * 1000) & 0xFFFFFFFF
+        self._send(lambda: self._mav.mav.named_value_float_send(ts, enc, float(value)))
 
     def send_scaled_pressure(self, pressure_hpa: float, temp_c: float) -> None:
-        if not self._mav:
-            return
-        self._mav.mav.scaled_pressure_send(
-            int(time.monotonic() * 1000) & 0xFFFFFFFF,
-            float(pressure_hpa), 0.0,
-            int(temp_c * 100),
-        )
+        ts    = int(time.monotonic() * 1000) & 0xFFFFFFFF
+        pres  = float(pressure_hpa)
+        temp  = int(temp_c * 100)
+        self._send(lambda: self._mav.mav.scaled_pressure_send(ts, pres, 0.0, temp))
 
     # ── receive ───────────────────────────────────────────────────────────────
 
     def _recv_loop(self) -> None:
+        import socket as _socket
+        # Access the underlying UDP socket directly — same as catch_hb.py which
+        # we confirmed works. recv_msg() wraps recv() in its own try/except and
+        # returns None on socket.timeout, making it impossible to distinguish
+        # "no data" from "parse failed", so we bypass it and use recvfrom() directly.
+        sock = self._mav.port
         while self._running:
             try:
-                msg = self._mav.recv_msg()
-                if msg is None:
-                    time.sleep(0.005)
-                    continue
-                self._dispatch(msg)
-            except Exception:
+                data, addr = sock.recvfrom(2048)
+            except _socket.timeout:
+                continue          # no data — normal, just retry
+            except Exception as e:
+                print(f"[RV{ROVER_ID}] recv error: {e}")
                 time.sleep(0.01)
+                continue
+
+            ip, port = addr
+
+            # GCS discovery: packet from port 14550 with sysid=255 is the tablet
+            if port == 14550 and _quick_sysid(data) == MAV_GCS_SYSID:
+                if addr != self._gcs_addr:
+                    self._gcs_addr = addr
+                    print(f"\n[RV{ROVER_ID}] GCS discovered at {ip}:{port}")
+
+            # Feed raw bytes to pymavlink parser (identical to recv_msg() internals)
+            self._mav.last_address = addr
+            for byte in data:
+                try:
+                    msg = self._mav.mav.parse_char(bytes([byte]))
+                    if msg:
+                        self._dispatch(msg)
+                except Exception:
+                    pass
 
     def _dispatch(self, msg) -> None:
         t = msg.get_type()
@@ -682,11 +689,11 @@ class MAVLink:
         if cmd == 400:   # MAV_CMD_COMPONENT_ARM_DISARM
             with state_lock:
                 state.is_armed = (msg.param1 == 1)
-            self._mav.mav.command_ack_send(cmd, 0)
+            self._send(lambda: self._mav.mav.command_ack_send(cmd, 0))
         elif cmd == 176:  # MAV_CMD_DO_SET_MODE
             with state_lock:
                 state.is_autonomous = (msg.param2 == 3)
-            self._mav.mav.command_ack_send(cmd, 0)
+            self._send(lambda: self._mav.mav.command_ack_send(cmd, 0))
 
 
 mav = MAVLink()
@@ -703,6 +710,13 @@ def _nmea_to_deg(value: str, hemisphere: str) -> float:
     if hemisphere in ("S", "W"):
         result = -result
     return result
+
+
+def _quick_sysid(data: bytes) -> int:
+    """Extract MAVLink sysid from raw bytes without full parsing. Returns -1 on failure."""
+    if len(data) >= 6  and data[0] == 0xFE: return data[3]   # MAVLink v1
+    if len(data) >= 10 and data[0] == 0xFD: return data[5]   # MAVLink v2
+    return -1
 
 
 def _haversine_bearing(lat1, lon1, lat2, lon2) -> tuple[float, float]:
@@ -876,7 +890,8 @@ def _status_loop() -> None:
             f"  TANK  {tank_s}   TEMP {temp_s}   HUMID {humid_s}   "
             f"PRES {_WH}{s.pressure_hpa:.1f}hPa{_R}\r\n"
             f"  {_DM}{time.strftime('%H:%M:%S')}  "
-            f"GCS {GCS_HOST}:{GCS_PORT}  sysid={MAV_SYSTEM_ID}{_R}\r\n"
+            f"GCS {mav._gcs_addr[0] if mav._gcs_addr else 'discovering…'}  "
+            f"sysid={MAV_SYSTEM_ID}{_R}\r\n"
             "\033[J"   # clear to end of screen
         )
 

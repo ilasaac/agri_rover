@@ -1,2 +1,4 @@
 emitter/build/
 receiver/build/
+rc_link_test/build/
+rc_link_test/RF24/

@@ -343,7 +343,7 @@ class UartEmulator:
     _LINK_TIMEOUT_S       = 0.5
 
     def __init__(self, physics: UnicyclePhysics, rover_id: int = 1,
-                 listen_port: int = 14550):
+                 listen_port: int = 14560):
         self._physics     = physics
         self._rover_id    = rover_id
         self._listen_port = listen_port
