@@ -58,7 +58,7 @@ GPS_SECONDARY_PORT:   str = os.environ.get("GPS_SECONDARY_PORT",   "/dev/ttyUSB1
 GPS_BAUD:             int = 115200
 
 # GCS (MK32 tablet via SIYI HM30 or direct UDP)
-GCS_HOST:             str = os.environ.get("GCS_HOST",             "192.168.144.255")
+GCS_HOST:             str = os.environ.get("GCS_HOST",             "127.0.0.1")
 GCS_PORT:             int = int(os.environ.get("GCS_PORT",         "14550"))
 MAVLINK_BIND_PORT:    int = 14550 + (ROVER_ID - 1)   # rover1=14550, rover2=14551
 
