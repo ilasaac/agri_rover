@@ -595,21 +595,39 @@ class MAVLink:
     # ── receive ───────────────────────────────────────────────────────────────
 
     def _recv_loop(self) -> None:
+        import socket as _socket
+        # Access the underlying UDP socket directly — same as catch_hb.py which
+        # we confirmed works. recv_msg() wraps recv() in its own try/except and
+        # returns None on socket.timeout, making it impossible to distinguish
+        # "no data" from "parse failed", so we bypass it and use recvfrom() directly.
+        sock = self._mav.port
         while self._running:
             try:
-                msg = self._mav.recv_msg()
-                if msg is None:
-                    time.sleep(0.005)
-                    continue
-                # Dynamic GCS discovery — learn tablet IP from its heartbeat broadcast
-                if msg.get_srcSystem() == MAV_GCS_SYSID:
-                    addr = self._mav.last_address
-                    if addr and addr != self._gcs_addr:
-                        self._gcs_addr = addr
-                        print(f"\n[RV{ROVER_ID}] GCS discovered at {addr[0]}:{addr[1]}")
-                self._dispatch(msg)
-            except Exception:
+                data, addr = sock.recvfrom(2048)
+            except _socket.timeout:
+                continue          # no data — normal, just retry
+            except Exception as e:
+                print(f"[RV{ROVER_ID}] recv error: {e}")
                 time.sleep(0.01)
+                continue
+
+            ip, port = addr
+
+            # GCS discovery: packet from port 14550 with sysid=255 is the tablet
+            if port == 14550 and _quick_sysid(data) == MAV_GCS_SYSID:
+                if addr != self._gcs_addr:
+                    self._gcs_addr = addr
+                    print(f"\n[RV{ROVER_ID}] GCS discovered at {ip}:{port}")
+
+            # Feed raw bytes to pymavlink parser (identical to recv_msg() internals)
+            self._mav.last_address = addr
+            for byte in data:
+                try:
+                    msg = self._mav.mav.parse_char(bytes([byte]))
+                    if msg:
+                        self._dispatch(msg)
+                except Exception:
+                    pass
 
     def _dispatch(self, msg) -> None:
         t = msg.get_type()
@@ -692,6 +710,13 @@ def _nmea_to_deg(value: str, hemisphere: str) -> float:
     if hemisphere in ("S", "W"):
         result = -result
     return result
+
+
+def _quick_sysid(data: bytes) -> int:
+    """Extract MAVLink sysid from raw bytes without full parsing. Returns -1 on failure."""
+    if len(data) >= 6  and data[0] == 0xFE: return data[3]   # MAVLink v1
+    if len(data) >= 10 and data[0] == 0xFD: return data[5]   # MAVLink v2
+    return -1
 
 
 def _haversine_bearing(lat1, lon1, lat2, lon2) -> tuple[float, float]:
