@@ -991,12 +991,6 @@ def main() -> None:
 
     if args.sim_gps:
         _launch_sim_gps(ROVER_ID, args.real_port, GCS_HOST)
-        # When sim-gps is active on RV1 and no explicit relay-host was given,
-        # RV2's sim.py must be running on this machine — relay RC_CHANNELS to it
-        # on localhost so the embedded UDP listener receives them.
-        if ROVER_ID == 1 and not RELAY_HOST:
-            RELAY_HOST = "127.0.0.1"
-            print(f"[RV1] sim-gps active — defaulting RC relay to {RELAY_HOST}:{RELAY_PORT}")
     # --sim-rc is redundant when --sim-gps is used for RV2 (sim.py emulate mode
     # now embeds the MAVLink RC listener).  Only launch the standalone emulator
     # when sim-gps is NOT active (e.g. real GPS but simulated RC link).

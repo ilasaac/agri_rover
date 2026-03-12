@@ -112,19 +112,20 @@ RV2 (no hardware)
 
 `rover/main.py` launches all required subprocesses automatically.
 
-**Rover 1:**
+**Rover 1** (replace `<RV2_IP>` with the RV2 machine's IP address):
 ```bash
-ROVER_ID=1 python rover/main.py --sim-gps --real-port /dev/ttyACM0
+ROVER_ID=1 python rover/main.py --sim-gps --real-port /dev/ttyACM0 --relay-host <RV2_IP>
 ```
 Spawns `sim.py --rover 1 --mode proxy` internally, which bridges the real RP2040 UART
-and outputs virtual GPS pty paths.
+and outputs virtual GPS pty paths. `--relay-host` sends RC_CHANNELS directly to RV2's
+embedded UDP listener on port 14560 — required because RV1 and RV2 run on separate machines.
 
 **Rover 2:**
 ```bash
 ROVER_ID=2 python rover/main.py --sim-gps
 ```
 Spawns `sim.py --rover 2 --mode emulate` internally. The emulate mode includes an
-embedded MAVLink UDP listener (port 14550) that receives `RC_CHANNELS` from RV1 and
+embedded MAVLink UDP listener (port 14560) that receives `RC_CHANNELS` from RV1 and
 drives the virtual RP2040 UART — no separate emulator process needed.
 
 ---
@@ -140,7 +141,7 @@ python simulator/sim.py --rover 1 --mode proxy --real-port /dev/ttyACM0
 
 **Terminal 2 — RV1 rover** (use pty paths printed by sim):
 ```bash
-ROVER_ID=1 UART_PORT=<pty> GPS_PRIMARY_PORT=<pty> GPS_SECONDARY_PORT=<pty> python rover/main.py
+ROVER_ID=1 UART_PORT=<pty> GPS_PRIMARY_PORT=<pty> GPS_SECONDARY_PORT=<pty> python rover/main.py --relay-host <RV2_IP>
 ```
 
 **Terminal 3 — RV2 GPS simulator + RC emulator:**
