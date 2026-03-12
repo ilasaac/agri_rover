@@ -295,20 +295,19 @@ class UartProxy:
 
     def _sniff_ch(self, line: str) -> None:
         """Sniff CH: lines from RP2040, apply rover-selection + mode gating,
-        then drive physics.  Mirrors the gating logic in rover/main.py
-        _parse_channels so the sim stays still when the rover is not selected."""
+        then drive physics.  Trusts the firmware MODE string for mode detection."""
         if not line.startswith("CH:"):
             return
         try:
-            ch_part = line[3:].split(" MODE:")[0]
+            parts   = line[3:].split(" MODE:", 1)
+            ch_part = parts[0]
+            fw_mode = parts[1].strip() if len(parts) > 1 else ""
             vals = [int(v) for v in ch_part.split(",")]
             if len(vals) < 8:
                 return
-            swa       = vals[4]   # CH5 — emergency stop
-            swb       = vals[5]   # CH6 — autonomous mode
-            rover_sel = vals[8] if len(vals) > 8 else 1000  # CH9
-            is_emergency  = swa < self._EMERGENCY_THRESHOLD
-            is_autonomous = (not is_emergency) and (swb > self._AUTONOMOUS_THRESHOLD)
+            rover_sel     = vals[8] if len(vals) > 8 else 1000  # CH9
+            is_emergency  = (fw_mode == "EMERGENCY")
+            is_autonomous = ("AUTO" in fw_mode)
             if is_autonomous or is_emergency:
                 active = False
             elif self._rover_id == 1:

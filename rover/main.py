@@ -262,22 +262,28 @@ class UARTBridge:
 
     def _parse_channels(self, data: str) -> None:
         try:
-            ch_part = data.split(" MODE:")[0]
+            parts   = data.split(" MODE:", 1)
+            ch_part = parts[0]
+            fw_mode = parts[1].strip() if len(parts) > 1 else ""
+
             vals = [int(v.strip()) for v in ch_part.split(",")]
             if len(vals) < 8:
                 return
-            swa = vals[CH_EMERGENCY]
-            swb = vals[CH_MODE]
-            is_emergency  = swa < EMERGENCY_THRESHOLD
-            is_autonomous = (not is_emergency) and (swb > AUTONOMOUS_THRESHOLD)
-            rover_sel     = vals[CH_ROVER_SEL] if len(vals) > CH_ROVER_SEL else PPM_MIN
+
+            rover_sel = vals[CH_ROVER_SEL] if len(vals) > CH_ROVER_SEL else PPM_MIN
+
+            # Trust the RP2040 firmware's own mode string — it knows its state
+            # better than we can infer from raw channel values (thresholds in the
+            # firmware may differ from what we assume).
+            # "AUTO-TIMEOUT" = rover was in autonomous mode but timed out waiting
+            # for commands; firmware locks CH1/CH2 to 1500 for safety.
+            is_emergency  = (fw_mode == "EMERGENCY")
+            is_autonomous = ("AUTO" in fw_mode)   # AUTO, AUTO-TIMEOUT, AUTONOMOUS …
 
             # Gate throttle/steering by rover selection (CH9)
             # CH9 ≤ 1250 → RV1 only;  1250 < CH9 ≤ 1750 → RV2 only;  CH9 > 1750 → both
-            # AUTO mode: joystick blocked — autonomous script sends commands directly
-            if is_autonomous:
-                active = False
-            elif is_emergency:
+            # AUTO / EMERGENCY: joystick blocked
+            if is_autonomous or is_emergency:
                 active = False
             elif ROVER_ID == 1:
                 active = (rover_sel <= ROVER_SELECT_LOW) or (rover_sel > ROVER_SELECT_HIGH)
@@ -291,10 +297,6 @@ class UARTBridge:
 
             now = time.monotonic()
             with state_lock:
-                # Only overwrite rc_channels (relayed to RV2) when the GCS has
-                # not sent a recent RC_CHANNELS_OVERRIDE.  The SIYI MK32 joystick
-                # values come via override; the RP2040 UART output only carries
-                # CH9 (rover select) reliably, so we avoid stomping GCS input.
                 if now - state.last_rc_override_t > 0.5:
                     state.rc_channels = vals
                 state.ppm_channels  = effective[:8]
