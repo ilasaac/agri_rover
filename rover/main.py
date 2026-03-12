@@ -64,6 +64,10 @@ GCS_HOST:             str = os.environ.get("GCS_HOST",             "127.0.0.1")
 GCS_PORT:             int = int(os.environ.get("GCS_PORT",         str(14549 + ROVER_ID)))  # RV1=14550, RV2=14551
 MAVLINK_BIND_PORT:    int = 14550 + (ROVER_ID - 1)   # rover1=14550, rover2=14551
 
+# Direct RC relay to RV2 machine (RV1 only) — avoids relying on WiFi broadcast
+RELAY_HOST:           str = os.environ.get("RELAY_HOST", "")   # RV2 machine IP
+RELAY_PORT:           int = 14550                               # rp2040_emulator listen port
+
 # PPM / channel constants
 PPM_MIN    = 1000
 PPM_CENTER = 1500
@@ -416,11 +420,14 @@ gps = GpsReader()
 
 class MAVLink:
     def __init__(self):
-        self._mav     = None
-        self._running = False
-        self._lock    = threading.Lock()
+        self._mav       = None
+        self._relay_mav = None   # second connection: RC relay direct to RV2 machine
+        self._running   = False
+        self._lock      = threading.Lock()
 
     def connect(self) -> None:
+        import socket as _socket
+
         conn = f"udpout:{GCS_HOST}:{GCS_PORT}"
         self._mav = mavutil.mavlink_connection(
             conn,
@@ -432,6 +439,29 @@ class MAVLink:
                 self._mav.port.settimeout(0.2)
             except Exception:
                 pass
+        # Enable broadcast when GCS_HOST is a broadcast address
+        if GCS_HOST.endswith(".255"):
+            try:
+                self._mav.port.setsockopt(_socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
+            except Exception:
+                pass
+
+        # RV1 only: open a dedicated relay socket to RV2 machine so RC_CHANNELS
+        # reach the rp2040_emulator even when WiFi blocks directed broadcast.
+        if ROVER_ID == 1 and RELAY_HOST:
+            self._relay_mav = mavutil.mavlink_connection(
+                f"udpout:{RELAY_HOST}:{RELAY_PORT}",
+                source_system    = MAV_SYSTEM_ID,
+                source_component = MAV_COMPONENT_ID,
+            )
+            if RELAY_HOST.endswith(".255"):
+                try:
+                    self._relay_mav.port.setsockopt(
+                        _socket.SOL_SOCKET, _socket.SO_BROADCAST, 1)
+                except Exception:
+                    pass
+            print(f"[RV1] RC relay → {RELAY_HOST}:{RELAY_PORT}")
+
         self._running = True
         threading.Thread(target=self._recv_loop, daemon=True, name="mav-recv").start()
 
@@ -440,6 +470,11 @@ class MAVLink:
         if self._mav:
             try:
                 self._mav.close()
+            except Exception:
+                pass
+        if self._relay_mav:
+            try:
+                self._relay_mav.close()
             except Exception:
                 pass
 
@@ -497,9 +532,9 @@ class MAVLink:
             raw = list(state.rc_channels)
         n = len(raw)
         all_ch = (raw + [65535] * (18 - n))
-        self._mav.mav.rc_channels_send(
-            int(time.monotonic() * 1000) & 0xFFFFFFFF,
-            n,
+        ts = int(time.monotonic() * 1000) & 0xFFFFFFFF
+        _args = (
+            ts, n,
             all_ch[0],  all_ch[1],  all_ch[2],  all_ch[3],
             all_ch[4],  all_ch[5],  all_ch[6],  all_ch[7],
             all_ch[8],  all_ch[9],  all_ch[10], all_ch[11],
@@ -507,6 +542,9 @@ class MAVLink:
             all_ch[16], all_ch[17],
             255,
         )
+        self._mav.mav.rc_channels_send(*_args)
+        if self._relay_mav:
+            self._relay_mav.mav.rc_channels_send(*_args)
 
     def send_gps_raw(self) -> None:
         if not self._mav:
@@ -898,7 +936,7 @@ def _launch_sim_rc(listen_port: int) -> None:
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
-    global GCS_HOST
+    global GCS_HOST, RELAY_HOST
 
     parser = argparse.ArgumentParser(description=f"Agri Rover controller")
     parser.add_argument("--sim-gps", action="store_true",
@@ -908,10 +946,14 @@ def main() -> None:
     parser.add_argument("--real-port", default=UART_PORT,
                         help=f"Real RP2040 serial port for Rover 1 proxy mode (default: {UART_PORT})")
     parser.add_argument("--gcs-host", default=GCS_HOST,
-                        help=f"GCS address or subnet broadcast (default: {GCS_HOST})")
+                        help=f"GCS tablet IP or subnet broadcast (default: {GCS_HOST})")
+    parser.add_argument("--relay-host", default=RELAY_HOST,
+                        help="RV2 machine IP for direct RC relay (Rover 1 only). "
+                             "Use when WiFi broadcast does not reach RV2.")
     args = parser.parse_args()
 
-    GCS_HOST = args.gcs_host   # update global before any network calls
+    GCS_HOST   = args.gcs_host
+    RELAY_HOST = args.relay_host
 
     if args.sim_gps:
         _launch_sim_gps(ROVER_ID, args.real_port, GCS_HOST)
@@ -922,6 +964,8 @@ def main() -> None:
     print(f"  UART:        {UART_PORT}:{UART_BAUD}")
     print(f"  GPS primary: {GPS_PRIMARY_PORT}  secondary: {GPS_SECONDARY_PORT}")
     print(f"  MAVLink out: {GCS_HOST}:{GCS_PORT}  (sysid={MAV_SYSTEM_ID})")
+    if RELAY_HOST:
+        print(f"  RC relay:    {RELAY_HOST}:{RELAY_PORT}")
 
     uart.connect()
     gps.start()
