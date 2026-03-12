@@ -173,15 +173,25 @@ class UARTBridge:
         self._hb_last_rx   = 0.0
         self._hb_ever_rx   = False
         self._hb_last_sent = 0.0
+        self._log_file     = None   # kept open for the lifetime of the process
 
     def connect(self) -> None:
         self._ser = serial.Serial(UART_PORT, UART_BAUD, timeout=0.1)
         self._ser.reset_input_buffer()
         self._running = True
+        try:
+            self._log_file = open(f"/tmp/rv{ROVER_ID}_uart.log", "a")
+        except Exception:
+            self._log_file = None
         threading.Thread(target=self._recv_loop, daemon=True, name="uart-recv").start()
 
     def close(self) -> None:
         self._running = False
+        if self._log_file:
+            try:
+                self._log_file.close()
+            except Exception:
+                pass
         if self._ser and self._ser.is_open:
             self._ser.close()
 
@@ -223,21 +233,20 @@ class UARTBridge:
             pass
 
     def _recv_loop(self) -> None:
-        _log_path = f"/tmp/rv{ROVER_ID}_uart.log"
+        _log_bytes = 0
         while self._running:
             try:
                 raw = self._ser.readline()
                 if raw:
                     line = raw.decode("utf-8", errors="ignore").strip()
                     if line:
-                        try:
-                            # Write while file is under 8 KB; recreates after deletion
-                            if not os.path.exists(_log_path) or \
-                                    os.path.getsize(_log_path) < 8192:
-                                with open(_log_path, "a") as _f:
-                                    _f.write(line + "\n")
-                        except Exception:
-                            pass
+                        if self._log_file and _log_bytes < 8192:
+                            try:
+                                self._log_file.write(line + "\n")
+                                self._log_file.flush()
+                                _log_bytes += len(line) + 1
+                            except Exception:
+                                pass
                         self._parse_line(line)
             except Exception:
                 time.sleep(0.01)

@@ -21,14 +21,13 @@ uint8_t address[2][6] = {"1Node", "2Node"};
 int main() {
     stdio_init_all();
     
-    // CRITICAL FIX 1: Wait for the computer to actually connect to the serial port!
-    // (Note: If you ever power this from a battery instead of USB, you must remove this loop)
+    // Wait for the computer to actually connect to the serial port
     while (!stdio_usb_connected()) {
         sleep_ms(100);
     }
     sleep_ms(1000); // Give the terminal one extra second to render the window
 
-    printf("=================================\n");
+    printf("\n=================================\n");
     if (IS_INITIATOR) {
         printf("  STARTING AS INITIATOR (Sender)\n");
     } else {
@@ -36,8 +35,17 @@ int main() {
     }
     printf("=================================\n");
 
-    // Initialize radio, but DO NOT freeze if it fails
+    // --- CRITICAL FIX: Explicitly route the SPI pins ---
+    // Initialize SPI0 at 1 MHz (A very stable, conservative speed for testing)
+    spi_init(spi0, 1000000);
+    gpio_set_function(PIN_MISO, GPIO_FUNC_SPI);
+    gpio_set_function(PIN_SCK,  GPIO_FUNC_SPI);
+    gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
+    // Note: CE and CSN are standard GPIOs, so the RF24 library handles them.
+
+    // Try to initialize the radio
     bool radio_ok = radio.begin();
+
     if (!radio_ok) {
         printf("ERROR: nRF24L01 not found! Check wiring.\n");
     } else {
@@ -64,9 +72,17 @@ int main() {
     while (true) {
         uint32_t current_time = time_us_32();
 
-        // CRITICAL FIX 2: System Heartbeat (runs every 2 seconds no matter what)
+        // System Heartbeat (runs every 2 seconds no matter what)
         if (current_time - last_sys_heartbeat > 2000000) {
             printf("[SYS] RP2040 is alive... (Radio OK: %s)\n", radio_ok ? "YES" : "NO");
+            
+            // If the radio is failing, print the diagnostic details every 2 seconds
+            if (!radio_ok) {
+                printf("\n--- RADIO DIAGNOSTICS ---\n");
+                radio.printPrettyDetails();
+                printf("-------------------------\n");
+            }
+            
             last_sys_heartbeat = current_time;
         }
 

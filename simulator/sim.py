@@ -263,6 +263,11 @@ class UartProxy:
             try:
                 ser = serial.Serial(self._real_port, 115200, timeout=0.1)
                 buf = b""
+                # Write direction runs in its own thread so it is never blocked
+                # by the serial read (RP2040 → main.py) path.
+                wt = threading.Thread(target=self._pty_to_serial,
+                                      args=(ser,), daemon=True, name="proxy-write")
+                wt.start()
                 while self._running:
                     # RP2040 → main.py
                     raw = ser.read(256)
@@ -270,21 +275,11 @@ class UartProxy:
                         try:
                             os.write(self._mfd, raw)
                         except OSError:
-                            pass
+                            break
                         buf += raw
                         while b"\n" in buf:
                             line, buf = buf.split(b"\n", 1)
                             self._sniff_ch(line.decode("utf-8", errors="ignore").strip())
-
-                    # main.py → RP2040
-                    rlist, _, _ = select.select([self._mfd], [], [], 0)
-                    if rlist:
-                        try:
-                            data = os.read(self._mfd, 256)
-                            if data:
-                                ser.write(data)
-                        except OSError:
-                            pass
 
             except serial.SerialException as exc:
                 print(f"[PROXY] {self._real_port}: {exc} — retry in 2 s")
@@ -292,6 +287,20 @@ class UartProxy:
             finally:
                 if ser and ser.is_open:
                     ser.close()
+
+    def _pty_to_serial(self, ser: serial.Serial) -> None:
+        """Forward data from pty master (main.py writes) to the real RP2040."""
+        while self._running and ser.is_open:
+            try:
+                rlist, _, _ = select.select([self._mfd], [], [], 0.02)
+                if rlist:
+                    data = os.read(self._mfd, 4096)
+                    if data:
+                        ser.write(data)
+            except OSError:
+                break
+            except Exception:
+                pass
 
     def _sniff_ch(self, line: str) -> None:
         """Sniff CH: lines from RP2040, apply rover-selection + mode gating,
