@@ -262,15 +262,17 @@ class UartProxy:
                         buf += raw
                         while b"\n" in buf:
                             line, buf = buf.split(b"\n", 1)
-                            self._sniff(line.decode("utf-8", errors="ignore").strip())
+                            self._sniff_ch(line.decode("utf-8", errors="ignore").strip())
 
-                    # main.py → RP2040
+                    # main.py → RP2040: also drive physics from outgoing PPM
+                    # commands so mode gating (AUTO/EMERGENCY) is respected.
                     rlist, _, _ = select.select([self._mfd], [], [], 0)
                     if rlist:
                         try:
                             data = os.read(self._mfd, 256)
                             if data:
                                 ser.write(data)
+                                self._sniff_cmd(data)
                         except OSError:
                             pass
 
@@ -281,15 +283,39 @@ class UartProxy:
                 if ser and ser.is_open:
                     ser.close()
 
-    def _sniff(self, line: str) -> None:
+    def _sniff_ch(self, line: str) -> None:
+        """Sniff CH: lines from RP2040 — only used to update rover_select (CH9).
+        Physics is now driven by outgoing PPM commands (_sniff_cmd) so that
+        mode gating in rover/main.py is reflected in the simulation."""
         if line.startswith("CH:"):
             try:
                 ch_part = line[3:].split(" MODE:")[0]
                 vals = [int(v) for v in ch_part.split(",")]
-                if len(vals) >= 2:
-                    self._physics.set_ppm(vals[0], vals[1])
+                # CH9 rover-select kept for reference but physics comes from cmd
+                _ = vals
             except ValueError:
                 pass
+
+    def _sniff_cmd(self, data: bytes) -> None:
+        """Parse PPM packets sent by rover/main.py to the RP2040 and use them
+        to drive physics.  Packets are already gated by mode/selection, so
+        physics stays still in AUTO or EMERGENCY modes."""
+        try:
+            text = data.decode("utf-8", errors="ignore")
+            for pkt in text.replace("<", "\x00<").split("\x00"):
+                pkt = pkt.strip()
+                if not (pkt.startswith("<") and pkt.endswith(">")):
+                    continue
+                inner = pkt[1:-1]
+                if inner.startswith("HB:"):
+                    continue
+                if inner.startswith("J:"):
+                    inner = inner[2:]
+                vals = [int(v) for v in inner.split(",")]
+                if len(vals) >= 2:
+                    self._physics.set_ppm(vals[0], vals[1])
+        except Exception:
+            pass
 
 
 # ─── UART emulator (emulate mode) ─────────────────────────────────────────────

@@ -152,6 +152,10 @@ class RoverState:
     uart_hb_ok:   bool  = False
     uart_hb_age:  Optional[float] = None
 
+    # Timestamp of last GCS RC_CHANNELS_OVERRIDE — used to prioritise GCS
+    # joystick over RP2040 UART output when relaying channels to Rover 2.
+    last_rc_override_t: float = 0.0
+
 state = RoverState()
 state_lock = threading.Lock()
 
@@ -275,8 +279,14 @@ class UARTBridge:
                 effective[CH_THROTTLE] = PPM_CENTER
                 effective[CH_STEERING] = PPM_CENTER
 
+            now = time.monotonic()
             with state_lock:
-                state.rc_channels   = vals
+                # Only overwrite rc_channels (relayed to RV2) when the GCS has
+                # not sent a recent RC_CHANNELS_OVERRIDE.  The SIYI MK32 joystick
+                # values come via override; the RP2040 UART output only carries
+                # CH9 (rover select) reliably, so we avoid stomping GCS input.
+                if now - state.last_rc_override_t > 0.5:
+                    state.rc_channels = vals
                 state.ppm_channels  = effective[:8]
                 state.sbus_ok       = True
                 state.is_emergency  = is_emergency
@@ -641,7 +651,7 @@ class MAVLink:
 
         uart.send_ppm(effective)
         with state_lock:
-            # Store raw 9-ch (override channels + CH9 from UART) for relay to rover 2
+            state.last_rc_override_t = time.monotonic()
             state.rc_channels   = list(ch) + [rover_sel]
             state.ppm_channels  = effective
             state.is_emergency  = is_emergency
@@ -808,15 +818,7 @@ def _status_loop() -> None:
         acc_s   = _c(f"{s.h_accuracy_m:.3f}m", acc_col)
         sats_s  = _c(str(s.num_sats), _GR if s.num_sats >= 8 else _YL)
 
-        # ── PPM bars (THR / STR) ──────────────────────────────────────────────
-        def _bar(val: int, w: int = 8) -> str:
-            frac   = max(0.0, min(1.0, (val - 1000) / 1000.0))
-            filled = round(frac * w)
-            col    = _GR if val > 1700 else (_RD if val < 1300 else _DM)
-            return f"{col}{'█'*filled}{'░'*(w-filled)}{_R} {val}"
-
-        # Recompute active in the display layer from current state so the bars
-        # always reflect the gating logic regardless of UART thread timing.
+        # ── CH1–CH9 values ────────────────────────────────────────────────────
         if s.is_emergency or s.is_autonomous:
             _disp_active = False
         elif ROVER_ID == 1:
@@ -824,10 +826,13 @@ def _status_loop() -> None:
         else:
             _disp_active = s.rover_select > ROVER_SELECT_LOW
 
-        _thr_val = s.rc_channels[0] if _disp_active else PPM_CENTER
-        _str_val = s.rc_channels[1] if _disp_active else PPM_CENTER
-        thr_s = _bar(_thr_val)
-        str_s = _bar(_str_val)
+        _rc = (list(s.rc_channels) + [PPM_CENTER] * 9)[:9]
+        def _cv(i: int) -> str:
+            v   = _rc[i] if (i == 8 or _disp_active) else PPM_CENTER
+            col = _GR if v > 1700 else (_RD if v < 1300 else _DM)
+            return f"{col}CH{i+1}:{v}{_R}"
+        _ch_row1 = "  ".join(_cv(i) for i in range(5))
+        _ch_row2 = "  ".join(_cv(i) for i in range(5, 9))
 
         # ── Sensors ───────────────────────────────────────────────────────────
         tank_col = _GR if s.tank_pct > 30 else (_YL if s.tank_pct > 15 else _RD)
@@ -846,7 +851,8 @@ def _status_loop() -> None:
             f"{armed_s}  {mode_s}  SEL: {sel_s}\r\n"
             f"{sep}"
             f"  SBUS  {sbus_s}        HB  {hb_s}\r\n"
-            f"  THR   {thr_s}         STR {str_s}\r\n"
+            f"  {_ch_row1}\r\n"
+            f"  {_ch_row2}\r\n"
             f"{sep}"
             f"  GPS   {fix_s}   sats={sats_s}   acc={acc_s}\r\n"
             f"  pos   {_WH}{s.lat:.7f}{_R}, {_WH}{s.lon:.7f}{_R}\r\n"
