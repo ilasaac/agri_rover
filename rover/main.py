@@ -61,7 +61,7 @@ GPS_BAUD:             int = 115200
 
 # GCS (MK32 tablet via SIYI HM30 or direct UDP)
 GCS_HOST:             str = os.environ.get("GCS_HOST",             "127.0.0.1")
-GCS_PORT:             int = int(os.environ.get("GCS_PORT",         str(14549 + ROVER_ID)))  # RV1=14550, RV2=14551
+GCS_PORT:             int = int(os.environ.get("GCS_PORT",         "14550"))
 MAVLINK_BIND_PORT:    int = 14550 + (ROVER_ID - 1)   # rover1=14550, rover2=14551
 
 # Direct RC relay to RV2 machine (RV1 only) — avoids relying on WiFi broadcast
