@@ -418,6 +418,9 @@ def main() -> None:
     parser.add_argument("--mode",  choices=["proxy", "emulate"], default="emulate")
     parser.add_argument("--real-port", default="/dev/ttyACM0",
                         help="Real RP2040 port (proxy mode only)")
+    parser.add_argument("--gcs-host", default="192.168.144.255",
+                        help="GCS broadcast address (default: 192.168.144.255 for SIYI; "
+                             "use 192.168.100.255 for WiFi testing)")
     parser.add_argument("--lat", type=float, default=None)
     parser.add_argument("--lon", type=float, default=None)
     parser.add_argument("--heading", type=float, default=0.0)
@@ -456,7 +459,7 @@ def main() -> None:
     print(f"  UART_PORT={uart_iface.pty_path} \\")
     print(f"  GPS_PRIMARY_PORT={gps_writer.primary_path} \\")
     print(f"  GPS_SECONDARY_PORT={gps_writer.secondary_path} \\")
-    print(f"  GCS_HOST=192.168.144.255 \\")
+    print(f"  GCS_HOST={args.gcs_host} \\")
     print(f"  python rover/main.py\n")
 
     # Live display

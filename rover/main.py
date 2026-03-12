@@ -174,7 +174,12 @@ class UARTBridge:
             self._ser.close()
 
     def send_ppm(self, channels: list[int]) -> None:
-        packet = "<" + ",".join(str(v) for v in channels) + ">"
+        # Rover 1 (emitter RP2040): legacy <T,S> — firmware only reads first 2 channels
+        # Rover 2 (receiver RP2040): <J:ch1,...,ch8> — CC1101 fallback path in firmware
+        if ROVER_ID == 2:
+            packet = "<J:" + ",".join(str(v) for v in channels[:8]) + ">"
+        else:
+            packet = "<" + ",".join(str(v) for v in channels[:2]) + ">"
         self._write(packet.encode())
 
     def send_heartbeat(self) -> None:
@@ -246,9 +251,26 @@ class UARTBridge:
             is_emergency  = swa < EMERGENCY_THRESHOLD
             is_autonomous = (not is_emergency) and (swb > AUTONOMOUS_THRESHOLD)
             rover_sel     = vals[CH_ROVER_SEL] if len(vals) > CH_ROVER_SEL else PPM_MIN
+
+            # Gate throttle/steering by rover selection (CH9)
+            # CH9 ≤ 1250 → RV1 only;  1250 < CH9 ≤ 1750 → RV2 only;  CH9 > 1750 → both
+            if is_autonomous:
+                active = True
+            elif is_emergency:
+                active = False
+            elif ROVER_ID == 1:
+                active = (rover_sel <= ROVER_SELECT_LOW) or (rover_sel > ROVER_SELECT_HIGH)
+            else:
+                active = rover_sel > ROVER_SELECT_LOW
+
+            effective = list(vals)
+            if not active:
+                effective[CH_THROTTLE] = PPM_CENTER
+                effective[CH_STEERING] = PPM_CENTER
+
             with state_lock:
                 state.rc_channels   = vals
-                state.ppm_channels  = vals[:8]
+                state.ppm_channels  = effective[:8]
                 state.sbus_ok       = True
                 state.is_emergency  = is_emergency
                 state.is_autonomous = is_autonomous
@@ -551,15 +573,32 @@ class MAVLink:
         ]
         # Replace 0/65535 with center
         ch = [PPM_CENTER if v in (0, 65535) else v for v in ch]
-        uart.send_ppm(ch)
-        # Update display — RC_CHANNELS_OVERRIDE is the active control source
-        # (SIYI HM30 sends this at 50 Hz from physical MK32 sticks)
+
         swa = ch[CH_EMERGENCY]
         swb = ch[CH_MODE]
         is_emergency  = swa < EMERGENCY_THRESHOLD
         is_autonomous = (not is_emergency) and (swb > AUTONOMOUS_THRESHOLD)
+
         with state_lock:
-            state.ppm_channels  = list(ch)
+            rover_sel = state.rover_select
+
+        if is_autonomous:
+            active = True
+        elif is_emergency:
+            active = False
+        elif ROVER_ID == 1:
+            active = (rover_sel <= ROVER_SELECT_LOW) or (rover_sel > ROVER_SELECT_HIGH)
+        else:
+            active = rover_sel > ROVER_SELECT_LOW
+
+        effective = list(ch)
+        if not active:
+            effective[CH_THROTTLE] = PPM_CENTER
+            effective[CH_STEERING] = PPM_CENTER
+
+        uart.send_ppm(effective)
+        with state_lock:
+            state.ppm_channels  = effective
             state.is_emergency  = is_emergency
             state.is_autonomous = is_autonomous
 
