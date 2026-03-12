@@ -226,11 +226,12 @@ class UARTBridge:
             with state_lock:
                 state.sbus_ok = True
         elif line.startswith("<HB:") and line.endswith(">"):
+            # Any valid echo from the RP2040 confirms it is alive.
+            # Strict expected-number matching races with proxy latency.
             try:
-                n = int(line[4:-1])
-                if self._hb_expected >= 0 and n == self._hb_expected:
-                    self._hb_last_rx  = time.time()
-                    self._hb_ever_rx  = True
+                int(line[4:-1])   # validate it is a number
+                self._hb_last_rx = time.time()
+                self._hb_ever_rx = True
             except ValueError:
                 pass
 
