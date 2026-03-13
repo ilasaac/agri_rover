@@ -358,9 +358,6 @@ class UARTBridge:
             now = time.monotonic()
             t_lock = time.monotonic()
             with state_lock:
-                lock_ms = (time.monotonic() - t_lock) * 1000
-                if lock_ms > 10:
-                    self._lag(f"state_lock wait={lock_ms:.0f}ms in _parse_channels")
                 if now - state.last_rc_override_t > 0.5:
                     state.rc_channels = vals
                 state.ppm_channels  = effective[:8]
@@ -571,8 +568,8 @@ class MAVLink:
         try:
             self._mav.last_address = addr
             fn()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[MAV SEND] addr={addr} err={e}", flush=True)
 
     def send_heartbeat(self) -> None:
         with state_lock:

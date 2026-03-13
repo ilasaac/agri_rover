@@ -3,12 +3,10 @@
 #include "hardware/spi.h"
 #include "RF24.h"
 
-// Allow CMake to define IS_INITIATOR. If it doesn't, default to 1.
 #ifndef IS_INITIATOR
 #define IS_INITIATOR 1
 #endif
 
-// SPI and Pin definitions
 #define PIN_MISO 4
 #define PIN_CSN  5
 #define PIN_SCK  6
@@ -16,136 +14,85 @@
 #define PIN_CE   8
 
 RF24 radio(PIN_CE, PIN_CSN);
-
-// EXPLICIT ADDRESSES (No more arrays to prevent pointer swapping)
 const uint8_t address_A[6] = "1Node";
-const uint8_t address_B[6] = "2Node";
+
+// --- THE DATA PAYLOAD ---
+// This struct holds your 9 PPM values. Total size: 18 bytes.
+struct RCPayload {
+    uint16_t channel[9];
+};
+
+RCPayload payload; // Create an instance of the struct
 
 int main() {
     stdio_init_all();
-    
-    // Wait for the computer to actually connect to the serial port
-    while (!stdio_usb_connected()) {
-        sleep_ms(100);
-    }
-    sleep_ms(1000); 
+    sleep_ms(2000); // 2-second boot delay for power stabilization
 
     printf("\n=================================\n");
-    if (IS_INITIATOR) {
-        printf("  STARTING AS INITIATOR (Sender)\n");
-    } else {
-        printf("  STARTING AS RESPONDER (Receiver)\n");
-    }
+    if (IS_INITIATOR) printf("  STARTING CONTROLLER (Transmitter)\n");
+    else printf("  STARTING ROVER (Receiver)\n");
     printf("=================================\n");
 
-    // Explicitly route the SPI pins
     spi_init(spi0, 1000000);
     gpio_set_function(PIN_MISO, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SCK,  GPIO_FUNC_SPI);
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
 
-    bool radio_ok = radio.begin();
-
-    if (!radio_ok) {
-        printf("ERROR: nRF24L01 not found! Check wiring.\n");
-    } else {
-        printf("SUCCESS: nRF24L01 found and initialized.\n");
-        
-        // --- DESKTOP TESTING & CLONE TIMING FIXES ---
-        radio.setPALevel(RF24_PA_LOW);       // Lower power to prevent desk overload
-        radio.setDataRate(RF24_1MBPS);       
-        radio.setChannel(76);                
-        radio.setRetries(15, 15);            // MAGIC FIX: Max delay (4000us) and max retries (15) for clones
-        radio.setPayloadSize(sizeof(uint32_t)); 
-
-        // Explicitly route addresses based on role
-        if (IS_INITIATOR) {
-            radio.openWritingPipe(address_A);       // Initiator writes to A
-            radio.openReadingPipe(1, address_B);    // Initiator listens on B
-            radio.stopListening();
-        } else {
-            radio.openWritingPipe(address_B);       // Responder writes to B
-            radio.openReadingPipe(1, address_A);    // Responder listens on A
-            radio.startListening();
-        }
-
-        printf("\n--- RADIO DIAGNOSTICS ---\n");
-        radio.printPrettyDetails();
-        printf("-------------------------\n\n");
+    if (!radio.begin()) {
+        printf("ERROR: nRF24L01 not found!\n");
     }
 
-    uint32_t heartbeat_val = 1;
-    uint32_t last_sys_heartbeat = time_us_32();
-    uint32_t last_radio_ping = time_us_32();
+    // --- BULLETPROOF RF SETTINGS ---
+    radio.setPALevel(RF24_PA_MAX);      // Turn power UP for actual room/outdoor distance
+    radio.setDataRate(RF24_250KBPS);    // Slow & steady for maximum range
+    radio.setChannel(76);               // Wi-Fi safe channel
+    radio.setPayloadSize(sizeof(RCPayload)); // Set payload size to exactly 18 bytes
+    radio.disableCRC();                 // Keep CRC off to bypass clone chip bugs
+
+    if (IS_INITIATOR) {
+        // Controller only needs to write
+        radio.openWritingPipe(address_A);
+        radio.stopListening();
+        
+        // Initialize dummy PPM values (Center stick positions ~1500)
+        for (int i = 0; i < 9; i++) {
+            payload.channel[i] = 1500;
+        }
+    } else {
+        // Rover only needs to read
+        radio.openReadingPipe(1, address_A);
+        radio.startListening();
+    }
+
+    uint32_t last_tx_time = time_us_32();
 
     while (true) {
-        uint32_t current_time = time_us_32();
+        if (IS_INITIATOR) {
+            // Send data 50 times per second (every 20,000 microseconds)
+            if (time_us_32() - last_tx_time > 20000) {
+                
+                // Simulate stick movement on Channel 0 (e.g., Throttle)
+                payload.channel[0]++;
+                if (payload.channel[0] > 2000) payload.channel[0] = 1000;
 
-        // System Heartbeat (runs every 2 seconds no matter what)
-        if (current_time - last_sys_heartbeat > 2000000) {
-            printf("[SYS] RP2040 is alive... (Radio OK: %s)\n", radio_ok ? "YES" : "NO");
-            last_sys_heartbeat = current_time;
-        }
-
-        // Only attempt radio communication if the radio initialized properly
-        if (radio_ok) {
-            if (IS_INITIATOR) {
-                // INITIATOR: Send a radio heartbeat every 1 second
-                if (current_time - last_radio_ping > 1000000) {
-                    printf("\n[RADIO] Sending payload: %d\n", heartbeat_val);
-                    radio.stopListening();
-                    
-                    // Check if the hardware actually delivered the packet
-                    bool delivery_success = radio.write(&heartbeat_val, sizeof(heartbeat_val));
-
-                    if (!delivery_success) {
-                        printf("[RADIO] Delivery failed! (No hardware ACK from Responder)\n");
-                    } else {
-                        printf("[RADIO] Hardware ACK received! Waiting for software response...\n");
-                        
-                        radio.startListening();
-                        uint32_t wait_start = time_us_32();
-                        bool timeout = true;
-
-                        // Wait up to 200ms for the software response
-                        while (time_us_32() - wait_start < 200000) {
-                            if (radio.available()) {
-                                timeout = false;
-                                break;
-                            }
-                        }
-
-                        if (timeout) {
-                            printf("[RADIO] Timeout! Responder hardware got it, but software didn't reply.\n");
-                        } else {
-                            uint32_t response;
-                            radio.read(&response, sizeof(response));
-                            printf("[RADIO] SUCCESS! Received response: %d\n", response);
-                            heartbeat_val = response + 1; 
-                        }
-                    }
-                    last_radio_ping = time_us_32(); 
-                }
-            } else {
-                // RESPONDER: Constantly check for incoming packets
-                if (radio.available()) {
-                    uint32_t received_val;
-                    radio.read(&received_val, sizeof(received_val));
-                    printf("\n[RADIO] Received incoming hp: %d\n", received_val);
-
-                    uint32_t next_val = received_val + 1;
-                    
-                    // Give the Initiator a tiny bit of time to switch its antenna to listening mode
-                    sleep_ms(10); 
-
-                    radio.stopListening();
-                    radio.write(&next_val, sizeof(next_val));
-                    printf("[RADIO] Responding with hp: %d\n", next_val);
-                    radio.startListening();
-                }
+                // Blast the entire 18-byte struct into the air
+                radio.write(&payload, sizeof(payload));
+                
+                printf("[TX] Sent Ch0: %d | Ch1: %d\n", payload.channel[0], payload.channel[1]);
+                last_tx_time = time_us_32(); 
+            }
+        } else {
+            // --- ROVER (RECEIVER) ---
+            if (radio.available()) {
+                // Read the incoming bytes directly into our struct memory
+                radio.read(&payload, sizeof(payload));
+                
+                // Print a few channels to prove it works
+                printf("[RX] Ch0 (Throttle): %d | Ch1 (Steering): %d | Ch8 (Aux): %d\n", 
+                       payload.channel[0], payload.channel[1], payload.channel[8]);
             }
         }
-        sleep_ms(1);
+        sleep_ms(1); // Keep the loop from hogging the CPU
     }
     return 0;
 }

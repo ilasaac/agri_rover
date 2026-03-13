@@ -342,8 +342,8 @@ class UartProxy:
                         self._proxy_log.flush()
                     except Exception:
                         pass
-                print(f"[PROXY] {self._real_port}: {exc} — retry in 2 s")
-                time.sleep(2.0)
+                print(f"[PROXY] {self._real_port}: {exc} — retry in 0.5 s")
+                time.sleep(0.5)
             finally:
                 if ser and ser.is_open:
                     ser.close()
@@ -634,6 +634,9 @@ class UartEmulator:
                         os.write(self._mfd, b"[RF_LINK_LOST]\n[SBUS_LOST]\n")
                     except OSError:
                         pass
+                if not rf_alive:
+                    time.sleep(0.1)
+                    continue
                 with self._ch_lock:
                     ch = list(self._ch)
                 line = "CH:" + ",".join(str(v) for v in ch) + " MODE:MANUAL\n"
