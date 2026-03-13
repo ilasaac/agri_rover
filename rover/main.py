@@ -174,6 +174,8 @@ class UARTBridge:
         self._hb_ever_rx   = False
         self._hb_last_sent = 0.0
         self._log_file     = None   # kept open for the lifetime of the process
+        self._lag_log      = None   # timing diagnostic log
+        self._hb_send_t    = 0.0   # monotonic time when last HB was written to pty
 
     def connect(self) -> None:
         self._ser = serial.Serial(UART_PORT, UART_BAUD, timeout=0.1)
@@ -183,6 +185,13 @@ class UARTBridge:
             self._log_file = open(f"/tmp/rv{ROVER_ID}_uart.log", "a")
         except Exception:
             self._log_file = None
+        try:
+            self._lag_log = open(f"/tmp/rv{ROVER_ID}_lag.log", "w")
+            self._lag_log.write(f"[{time.strftime('%H:%M:%S')}] UARTBridge started"
+                                f" port={UART_PORT}\n")
+            self._lag_log.flush()
+        except Exception:
+            self._lag_log = None
         threading.Thread(target=self._recv_loop, daemon=True, name="uart-recv").start()
 
     def close(self) -> None:
@@ -192,6 +201,12 @@ class UARTBridge:
                 self._log_file.close()
             except Exception:
                 pass
+        if self._lag_log:
+            try:
+                self._lag_log.close()
+            except Exception:
+                pass
+            self._lag_log = None
         if self._ser and self._ser.is_open:
             self._ser.close()
 
@@ -211,6 +226,7 @@ class UARTBridge:
         self._hb_counter  = (self._hb_counter + 1) % 10000
         self._hb_expected = (self._hb_counter + 1) % 10000
         self._write(f"<HB:{self._hb_counter}>".encode())
+        self._hb_send_t    = time.monotonic()
         self._hb_last_sent = now
 
     @property
@@ -232,11 +248,29 @@ class UARTBridge:
         except serial.SerialException:
             pass
 
+    def _lag(self, msg: str) -> None:
+        """Write a timing event to the lag log (non-blocking)."""
+        if self._lag_log:
+            try:
+                self._lag_log.write(f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+                self._lag_log.flush()
+            except Exception:
+                pass
+
     def _recv_loop(self) -> None:
         _log_bytes = 0
         while self._running:
             try:
+                t0  = time.monotonic()
                 raw = self._ser.readline()
+                rl_ms = (time.monotonic() - t0) * 1000
+
+                # Flag unusually fast returns (pty closed / data loss) or slow reads
+                if rl_ms < 5 and not raw:
+                    self._lag(f"readline fast-empty {rl_ms:.0f}ms")
+                elif rl_ms > 200:
+                    self._lag(f"readline SLOW {rl_ms:.0f}ms raw={raw!r:.40}")
+
                 if raw:
                     line = raw.decode("utf-8", errors="ignore").strip()
                     if line:
@@ -247,7 +281,11 @@ class UARTBridge:
                                 _log_bytes += len(line) + 1
                             except Exception:
                                 pass
+                        t1 = time.monotonic()
                         self._parse_line(line)
+                        parse_ms = (time.monotonic() - t1) * 1000
+                        if parse_ms > 20:
+                            self._lag(f"_parse_line SLOW {parse_ms:.0f}ms [{line[:40]}]")
             except Exception:
                 time.sleep(0.01)
 
@@ -265,6 +303,9 @@ class UARTBridge:
             # Strict expected-number matching races with proxy latency.
             try:
                 int(line[4:-1])   # validate it is a number
+                rtt_ms = (time.monotonic() - self._hb_send_t) * 1000
+                if rtt_ms > 300:
+                    self._lag(f"HB RTT={rtt_ms:.0f}ms (SLOW)")
                 self._hb_last_rx = time.time()
                 self._hb_ever_rx = True
             except ValueError:
@@ -306,7 +347,11 @@ class UARTBridge:
                 effective[CH_STEERING] = PPM_CENTER
 
             now = time.monotonic()
+            t_lock = time.monotonic()
             with state_lock:
+                lock_ms = (time.monotonic() - t_lock) * 1000
+                if lock_ms > 10:
+                    self._lag(f"state_lock wait={lock_ms:.0f}ms in _parse_channels")
                 if now - state.last_rc_override_t > 0.5:
                     state.rc_channels = vals
                 state.ppm_channels  = effective[:8]

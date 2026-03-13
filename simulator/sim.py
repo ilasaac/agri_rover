@@ -246,16 +246,31 @@ class UartProxy:
         self._running   = False
         self.pty_path:  str = ""
         self._mfd:      int = -1
+        self._proxy_log = None   # timing diagnostic log
 
     def start(self) -> None:
         mfd, sfd, self.pty_path = open_pty()
         self._mfd  = mfd
         self._sfd  = sfd
         self._running = True
+        try:
+            self._proxy_log = open("/tmp/rv1_proxy.log", "w")
+            self._proxy_log.write(
+                f"[{time.strftime('%H:%M:%S')}] UartProxy started port={self._real_port}\n"
+            )
+            self._proxy_log.flush()
+        except Exception:
+            pass
         threading.Thread(target=self._proxy_loop, daemon=True, name="uart-proxy").start()
 
     def stop(self) -> None:
         self._running = False
+        if self._proxy_log:
+            try:
+                self._proxy_log.close()
+            except Exception:
+                pass
+            self._proxy_log = None
 
     def _proxy_loop(self) -> None:
         ser: Optional[serial.Serial] = None
@@ -273,7 +288,19 @@ class UartProxy:
                     raw = ser.read(256)
                     if raw:
                         try:
+                            t0 = time.monotonic()
                             os.write(self._mfd, raw)
+                            write_ms = (time.monotonic() - t0) * 1000
+                            if write_ms > 10 and self._proxy_log:
+                                try:
+                                    self._proxy_log.write(
+                                        f"[{time.strftime('%H:%M:%S')}]"
+                                        f" pty write BLOCKED {write_ms:.0f}ms"
+                                        f" ({len(raw)}B)\n"
+                                    )
+                                    self._proxy_log.flush()
+                                except Exception:
+                                    pass
                         except OSError:
                             break
                         buf += raw
