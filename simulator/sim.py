@@ -639,7 +639,15 @@ class UartEmulator:
                     continue
                 with self._ch_lock:
                     ch = list(self._ch)
-                line = "CH:" + ",".join(str(v) for v in ch) + " MODE:MANUAL\n"
+                swa = ch[2] if len(ch) > 2 else 1500   # SWA = ppm_channels[2] (CH3)
+                swb = ch[3] if len(ch) > 3 else 1500   # SWB = ppm_channels[3] (CH4)
+                if swa < self._EMERGENCY_THRESHOLD:
+                    fw_mode = "EMERGENCY"
+                elif swb > self._AUTONOMOUS_THRESHOLD:
+                    fw_mode = "AUTO"
+                else:
+                    fw_mode = "MANUAL"
+                line = "CH:" + ",".join(str(v) for v in ch) + f" MODE:{fw_mode}\n"
                 if self._emu_log and ch != self._tx_last_ch:
                     try:
                         self._emu_log.write(
