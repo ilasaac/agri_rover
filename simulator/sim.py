@@ -365,12 +365,24 @@ class UartEmulator:
         self._ch:    list[int]  = [1500] * 9
         self._ch_lock            = threading.Lock()
         self._last_rx: float    = 0.0
+        self._emu_log            = None   # diagnostic log file (RV2 only)
+        self._tx_last_ch: list[int] = []  # last TX channel values for change detection
 
     def start(self) -> None:
         mfd, sfd, self.pty_path = open_pty()
         self._mfd = mfd
         self._sfd = sfd
         self._running = True
+        if self._rover_id == 2:
+            try:
+                self._emu_log = open("/tmp/rv2_emu.log", "w")
+                self._emu_log.write(
+                    f"[{time.strftime('%H:%M:%S')}] UartEmulator RV2 started"
+                    f" listen_port={self._listen_port}\n"
+                )
+                self._emu_log.flush()
+            except Exception:
+                pass
         threading.Thread(target=self._recv_loop, daemon=True, name="emu-recv").start()
         threading.Thread(target=self._send_loop, daemon=True, name="emu-send").start()
         if self._rover_id == 2:
@@ -379,6 +391,12 @@ class UartEmulator:
 
     def stop(self) -> None:
         self._running = False
+        if self._emu_log:
+            try:
+                self._emu_log.close()
+            except Exception:
+                pass
+            self._emu_log = None
 
     # ── MAVLink RC listener (RV2 only) ────────────────────────────────────────
 
@@ -398,6 +416,7 @@ class UartEmulator:
                         mav.port.settimeout(0.5)
                     except Exception:
                         pass
+                _rx_total = 0
                 while self._running:
                     try:
                         msg = mav.recv_msg()
@@ -405,15 +424,36 @@ class UartEmulator:
                         continue
                     if msg is None:
                         continue
-                    if msg.get_srcSystem() != 1:
+                    _rx_total += 1
+                    sysid = msg.get_srcSystem()
+                    mtype = msg.get_type()
+                    if self._emu_log:
+                        try:
+                            self._emu_log.write(
+                                f"[{time.strftime('%H:%M:%S')}] RX #{_rx_total}"
+                                f" sysid={sysid} type={mtype}\n"
+                            )
+                            self._emu_log.flush()
+                        except Exception:
+                            pass
+                    if sysid != 1:
                         continue
-                    if msg.get_type() == "RC_CHANNELS":
+                    if mtype == "RC_CHANNELS":
                         raw = [
                             msg.chan1_raw, msg.chan2_raw, msg.chan3_raw, msg.chan4_raw,
                             msg.chan5_raw, msg.chan6_raw, msg.chan7_raw, msg.chan8_raw,
                             msg.chan9_raw,
                         ]
                         ch = [1500 if v == 65535 else v for v in raw]
+                        if self._emu_log:
+                            try:
+                                self._emu_log.write(
+                                    f"[{time.strftime('%H:%M:%S')}] RC_CHANNELS"
+                                    f" raw={raw} ch={ch}\n"
+                                )
+                                self._emu_log.flush()
+                            except Exception:
+                                pass
                         with self._ch_lock:
                             self._ch = ch
                         self._last_rx = time.monotonic()
@@ -510,6 +550,15 @@ class UartEmulator:
                 with self._ch_lock:
                     ch = list(self._ch)
                 line = "CH:" + ",".join(str(v) for v in ch) + " MODE:MANUAL\n"
+                if self._emu_log and ch != self._tx_last_ch:
+                    try:
+                        self._emu_log.write(
+                            f"[{time.strftime('%H:%M:%S')}] TX {line.strip()}\n"
+                        )
+                        self._emu_log.flush()
+                        self._tx_last_ch = list(ch)
+                    except Exception:
+                        pass
             else:
                 # RV1 emulate: echo back whatever PPM was commanded
                 line = f"CH:{self._thr},{self._str},2000,2000,2000,2000,1500,1500,1000\n"

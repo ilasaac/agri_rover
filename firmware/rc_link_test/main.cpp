@@ -16,7 +16,10 @@
 #define PIN_CE   8
 
 RF24 radio(PIN_CE, PIN_CSN);
-uint8_t address[2][6] = {"1Node", "2Node"};
+
+// EXPLICIT ADDRESSES (No more arrays to prevent pointer swapping)
+const uint8_t address_A[6] = "1Node";
+const uint8_t address_B[6] = "2Node";
 
 int main() {
     stdio_init_all();
@@ -25,7 +28,7 @@ int main() {
     while (!stdio_usb_connected()) {
         sleep_ms(100);
     }
-    sleep_ms(1000); // Give the terminal one extra second to render the window
+    sleep_ms(1000); 
 
     printf("\n=================================\n");
     if (IS_INITIATOR) {
@@ -35,14 +38,12 @@ int main() {
     }
     printf("=================================\n");
 
-    // --- Explicitly route the SPI pins ---
-    // Initialize SPI0 at 1 MHz (A very stable, conservative speed for testing)
+    // Explicitly route the SPI pins
     spi_init(spi0, 1000000);
     gpio_set_function(PIN_MISO, GPIO_FUNC_SPI);
     gpio_set_function(PIN_SCK,  GPIO_FUNC_SPI);
     gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
 
-    // Try to initialize the radio
     bool radio_ok = radio.begin();
 
     if (!radio_ok) {
@@ -50,42 +51,39 @@ int main() {
     } else {
         printf("SUCCESS: nRF24L01 found and initialized.\n");
         
-        // --- NEW RF BULLETPROOFING ---
-        radio.setPALevel(RF24_PA_MIN);    // Prevents receiver overload when boards are close
-        radio.setDataRate(RF24_1MBPS);    // A slower, more reliable data rate
-        radio.setChannel(76);             // Shifts the frequency to avoid Wi-Fi interference
+        // --- DESKTOP TESTING & CLONE TIMING FIXES ---
+        radio.setPALevel(RF24_PA_LOW);       // Lower power to prevent desk overload
+        radio.setDataRate(RF24_1MBPS);       
+        radio.setChannel(76);                
+        radio.setRetries(15, 15);            // MAGIC FIX: Max delay (4000us) and max retries (15) for clones
         radio.setPayloadSize(sizeof(uint32_t)); 
 
+        // Explicitly route addresses based on role
         if (IS_INITIATOR) {
-            radio.openWritingPipe(address[0]);
-            radio.openReadingPipe(1, address[1]);
+            radio.openWritingPipe(address_A);       // Initiator writes to A
+            radio.openReadingPipe(1, address_B);    // Initiator listens on B
             radio.stopListening();
         } else {
-            radio.openWritingPipe(address[1]);
-            radio.openReadingPipe(1, address[0]);
+            radio.openWritingPipe(address_B);       // Responder writes to B
+            radio.openReadingPipe(1, address_A);    // Responder listens on A
             radio.startListening();
         }
+
+        printf("\n--- RADIO DIAGNOSTICS ---\n");
+        radio.printPrettyDetails();
+        printf("-------------------------\n\n");
     }
 
     uint32_t heartbeat_val = 1;
     uint32_t last_sys_heartbeat = time_us_32();
     uint32_t last_radio_ping = time_us_32();
 
-    // Main Loop
     while (true) {
         uint32_t current_time = time_us_32();
 
         // System Heartbeat (runs every 2 seconds no matter what)
         if (current_time - last_sys_heartbeat > 2000000) {
             printf("[SYS] RP2040 is alive... (Radio OK: %s)\n", radio_ok ? "YES" : "NO");
-            
-            // If the radio is failing, print the diagnostic details every 2 seconds
-            if (!radio_ok) {
-                printf("\n--- RADIO DIAGNOSTICS ---\n");
-                radio.printPrettyDetails();
-                printf("-------------------------\n");
-            }
-            
             last_sys_heartbeat = current_time;
         }
 
@@ -94,42 +92,51 @@ int main() {
             if (IS_INITIATOR) {
                 // INITIATOR: Send a radio heartbeat every 1 second
                 if (current_time - last_radio_ping > 1000000) {
-                    printf("[RADIO] Sending payload: %d\n", heartbeat_val);
+                    printf("\n[RADIO] Sending payload: %d\n", heartbeat_val);
                     radio.stopListening();
-                    radio.write(&heartbeat_val, sizeof(heartbeat_val));
+                    
+                    // Check if the hardware actually delivered the packet
+                    bool delivery_success = radio.write(&heartbeat_val, sizeof(heartbeat_val));
 
-                    radio.startListening();
-                    uint32_t wait_start = time_us_32();
-                    bool timeout = true;
+                    if (!delivery_success) {
+                        printf("[RADIO] Delivery failed! (No hardware ACK from Responder)\n");
+                    } else {
+                        printf("[RADIO] Hardware ACK received! Waiting for software response...\n");
+                        
+                        radio.startListening();
+                        uint32_t wait_start = time_us_32();
+                        bool timeout = true;
 
-                    // Wait up to 200ms for a response
-                    while (time_us_32() - wait_start < 200000) {
-                        if (radio.available()) {
-                            timeout = false;
-                            break;
+                        // Wait up to 200ms for the software response
+                        while (time_us_32() - wait_start < 200000) {
+                            if (radio.available()) {
+                                timeout = false;
+                                break;
+                            }
+                        }
+
+                        if (timeout) {
+                            printf("[RADIO] Timeout! Responder hardware got it, but software didn't reply.\n");
+                        } else {
+                            uint32_t response;
+                            radio.read(&response, sizeof(response));
+                            printf("[RADIO] SUCCESS! Received response: %d\n", response);
+                            heartbeat_val = response + 1; 
                         }
                     }
-
-                    if (timeout) {
-                        printf("[RADIO] Timeout! No response received.\n");
-                    } else {
-                        uint32_t response;
-                        radio.read(&response, sizeof(response));
-                        printf("[RADIO] Received response: %d\n", response);
-                        heartbeat_val = response + 1; // Increment for next round
-                    }
-                    
-                    last_radio_ping = time_us_32(); // Reset radio timer
+                    last_radio_ping = time_us_32(); 
                 }
             } else {
                 // RESPONDER: Constantly check for incoming packets
                 if (radio.available()) {
                     uint32_t received_val;
                     radio.read(&received_val, sizeof(received_val));
-                    printf("[RADIO] Received incoming hp: %d\n", received_val);
+                    printf("\n[RADIO] Received incoming hp: %d\n", received_val);
 
                     uint32_t next_val = received_val + 1;
-                    sleep_ms(10); // Give initiator time to switch to listening mode
+                    
+                    // Give the Initiator a tiny bit of time to switch its antenna to listening mode
+                    sleep_ms(10); 
 
                     radio.stopListening();
                     radio.write(&next_val, sizeof(next_val));
@@ -138,8 +145,6 @@ int main() {
                 }
             }
         }
-        
-        // Small delay to prevent the loop from hogging 100% of the CPU
         sleep_ms(1);
     }
     return 0;
