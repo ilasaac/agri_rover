@@ -18,6 +18,7 @@ import sys
 import time
 import threading
 import serial
+from pathlib import Path
 
 # ── ANSI colours ──────────────────────────────────────────────────────────────
 R   = "\033[0m"
@@ -64,12 +65,14 @@ state = {
     "channels":      [0] * 9,
     "payload_valid": False,   # True when all channels are in 800-2200
     "pkt_count":     0,
-    "pkt_rate":      0.0,
+    "pkt_rate":      0.0,     # 2-second sliding window Hz
+    "inst_rate":     0.0,     # instantaneous inter-packet rate
     "last_pkt_ts":   None,
     "events":        [],
     "raw_lines":     [],
 }
 state_lock = threading.Lock()
+log_file   = None             # set in main() when --log is used
 
 def _payload_valid(channels) -> bool:
     """Return True only if all 9 channels are in the valid PPM range."""
@@ -77,7 +80,8 @@ def _payload_valid(channels) -> bool:
 
 # ── Serial reader thread ───────────────────────────────────────────────────────
 def reader_thread(ser: serial.Serial, show_raw: bool):
-    pkt_times = []
+    pkt_times    = []
+    last_pkt_now = None
 
     while True:
         try:
@@ -91,6 +95,11 @@ def reader_thread(ser: serial.Serial, show_raw: bool):
 
         now = time.time()
 
+        # ── Log every raw line to file if requested ───────────────────────
+        if log_file:
+            log_file.write(f"{time.strftime('%H:%M:%S.') + f'{int((now % 1)*1000):03d}'}  {line}\n")
+            log_file.flush()
+
         with state_lock:
             if show_raw:
                 state["raw_lines"].append(line)
@@ -103,24 +112,31 @@ def reader_thread(ser: serial.Serial, show_raw: bool):
                     vals = [int(v) for v in ch_part[3:].split(",")]
                     valid = _payload_valid(vals)
 
-                    # Only update displayed state when payload looks valid
                     state["channels"]      = vals
                     state["mode"]          = mode_part.strip()
                     state["payload_valid"] = valid
                     state["last_pkt_ts"]   = now
                     state["pkt_count"]    += 1
 
+                    # 2-second sliding-window rate
                     pkt_times.append(now)
                     pkt_times = [t for t in pkt_times if now - t <= 2.0]
                     state["pkt_rate"] = len(pkt_times) / 2.0
 
+                    # Instantaneous inter-packet rate
+                    if last_pkt_now is not None:
+                        gap = now - last_pkt_now
+                        state["inst_rate"] = 1.0 / gap if gap > 0 else 0.0
+                    last_pkt_now = now
+
                     if not valid:
-                        state["events"].append(
-                            f"{MAG}[INVALID PAYLOAD] all zeros — noise or master not ready{R}"
-                            f"  {DIM}{_ts()}{R}"
-                        )
-                        if len(state["events"]) > 8:
-                            state["events"].pop(0)
+                        # Only add one warning at a time (avoid flooding)
+                        last_ev = state["events"][-1] if state["events"] else ""
+                        if "INVALID" not in last_ev:
+                            state["events"].append(
+                                f"{MAG}[INVALID PAYLOAD] zeros — noise or SPI/wiring fault{R}"
+                                f"  {DIM}{_ts()}{R}"
+                            )
                 except Exception:
                     pass
 
@@ -130,18 +146,19 @@ def reader_thread(ser: serial.Serial, show_raw: bool):
                 state["events"].append(f"{GRN}[RF_LINK_OK]{R}  {DIM}{_ts()}{R}")
 
             elif "[LINK_LOST]" in line:
-                state["rf_ok"]   = False
-                state["mode"]    = "LINK_LOST"
+                state["rf_ok"]    = False
+                state["mode"]     = "LINK_LOST"
                 state["pkt_rate"] = 0.0
                 state["events"].append(f"{RED}[LINK_LOST]{R}  {DIM}{_ts()}{R}")
 
             elif line.startswith("<HB:"):
                 pass
 
-            elif line.startswith("[") or line.startswith("SLAVE") or line.startswith("nRF24"):
+            else:
+                # Capture all other lines — boot messages, errors, etc.
                 state["events"].append(f"{YEL}{line}{R}  {DIM}{_ts()}{R}")
 
-            if len(state["events"]) > 8:
+            if len(state["events"]) > 10:
                 state["events"].pop(0)
 
 def _ts() -> str:
@@ -169,12 +186,21 @@ def render(port: str, show_raw: bool):
             rf_colour = GRN if s["rf_ok"] else RED
             rf_label  = "RF LINK OK" if s["rf_ok"] else "LINK LOST"
             rate_str  = f"{s['pkt_rate']:.1f} Hz" if s["rf_ok"] else "  0.0 Hz"
+            inst      = s["inst_rate"]
+            # Flag suspiciously high rate (radio.available() stuck → SPI fault)
+            rate_warn = ""
+            if inst > 200:
+                rate_warn = f"  {RED}RATE TOO HIGH — radio.available() stuck? check MISO wiring{R}"
+            elif 0 < inst < 5 and s["rf_ok"]:
+                rate_warn = f"  {YEL}rate low — interference or range?{R}"
+
             age = ""
             if s["last_pkt_ts"]:
                 ms = int((time.time() - s["last_pkt_ts"]) * 1000)
                 age = f"  last pkt: {ms} ms ago"
 
-            print(f"  Status   {rf_colour}{rf_label}{R}   {WHT}{rate_str}{R}{DIM}{age}{R}")
+            print(f"  Status   {rf_colour}{rf_label}{R}   {WHT}{rate_str}{R}"
+                  f"  inst: {inst:6.1f} Hz{DIM}{age}{R}{rate_warn}")
 
             # ── Payload validity warning ─────────────────────────────────────
             if not payload_valid and s["pkt_count"] > 0:
@@ -268,6 +294,8 @@ def main():
                         help="Baud rate (default 115200 — USB CDC-ACM ignores this)")
     parser.add_argument("--raw", action="store_true",
                         help="Also show the last 5 raw lines from the RP2040")
+    parser.add_argument("--log", metavar="FILE", default=None,
+                        help="Log every raw serial line with timestamps to FILE")
     args = parser.parse_args()
 
     port = args.port
@@ -285,6 +313,15 @@ def main():
         print(f"ERROR: Cannot open {port}: {e}", file=sys.stderr)
         sys.exit(1)
 
+    global log_file
+    if args.log:
+        log_file = open(args.log, "a")
+        log_file.write(f"\n{'='*60}\n")
+        log_file.write(f"Session start  {time.strftime('%Y-%m-%d %H:%M:%S')}  port={port}\n")
+        log_file.write(f"{'='*60}\n")
+        log_file.flush()
+        print(f"Logging to {args.log}")
+
     print(f"Opened {port} at {args.baud} baud. Waiting for data…")
     time.sleep(0.5)
 
@@ -294,6 +331,8 @@ def main():
     render(port, args.raw)
 
     ser.close()
+    if log_file:
+        log_file.close()
     print("Done.")
 
 if __name__ == "__main__":
