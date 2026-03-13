@@ -16,17 +16,14 @@
 RF24 radio(PIN_CE, PIN_CSN);
 const uint8_t address_A[6] = "1Node";
 
-// --- THE DATA PAYLOAD ---
-// This struct holds your 9 PPM values. Total size: 18 bytes.
 struct RCPayload {
     uint16_t channel[9];
 };
-
-RCPayload payload; // Create an instance of the struct
+RCPayload payload; 
 
 int main() {
     stdio_init_all();
-    sleep_ms(2000); // 2-second boot delay for power stabilization
+    sleep_ms(2000); // 2-second boot delay, NO USB LOCK!
 
     printf("\n=================================\n");
     if (IS_INITIATOR) printf("  STARTING CONTROLLER (Transmitter)\n");
@@ -42,57 +39,53 @@ int main() {
         printf("ERROR: nRF24L01 not found!\n");
     }
 
-    // --- BULLETPROOF RF SETTINGS ---
-    radio.setPALevel(RF24_PA_MAX);      // Turn power UP for actual room/outdoor distance
-    radio.setDataRate(RF24_250KBPS);    // Slow & steady for maximum range
-    radio.setChannel(76);               // Wi-Fi safe channel
-    radio.setPayloadSize(sizeof(RCPayload)); // Set payload size to exactly 18 bytes
-    radio.disableCRC();                 // Keep CRC off to bypass clone chip bugs
+    radio.setPALevel(RF24_PA_MAX);      
+    radio.setDataRate(RF24_250KBPS);    
+    radio.setChannel(76);               
+    radio.setPayloadSize(sizeof(RCPayload)); 
+    radio.disableCRC();                 
 
     if (IS_INITIATOR) {
-        // Controller only needs to write
         radio.openWritingPipe(address_A);
         radio.stopListening();
-        
-        // Initialize dummy PPM values (Center stick positions ~1500)
         for (int i = 0; i < 9; i++) {
             payload.channel[i] = 1500;
         }
     } else {
-        // Rover only needs to read
         radio.openReadingPipe(1, address_A);
         radio.startListening();
     }
 
     uint32_t last_tx_time = time_us_32();
+    uint32_t last_heartbeat = time_us_32();
 
     while (true) {
+        uint32_t current_time = time_us_32();
+
+        // Heartbeat for BOTH boards so you know they are alive
+        if (current_time - last_heartbeat > 1000000) {
+            if (!IS_INITIATOR) printf("."); // Print a dot every second on the Rover
+            last_heartbeat = current_time;
+        }
+
         if (IS_INITIATOR) {
-            // Send data 50 times per second (every 20,000 microseconds)
-            if (time_us_32() - last_tx_time > 20000) {
-                
-                // Simulate stick movement on Channel 0 (e.g., Throttle)
+            // Blast data 50 times a second
+            if (current_time - last_tx_time > 20000) {
                 payload.channel[0]++;
                 if (payload.channel[0] > 2000) payload.channel[0] = 1000;
 
-                // Blast the entire 18-byte struct into the air
                 radio.write(&payload, sizeof(payload));
-                
-                printf("[TX] Sent Ch0: %d | Ch1: %d\n", payload.channel[0], payload.channel[1]);
-                last_tx_time = time_us_32(); 
+                last_tx_time = current_time; 
             }
         } else {
-            // --- ROVER (RECEIVER) ---
+            // ROVER (RECEIVER)
             if (radio.available()) {
-                // Read the incoming bytes directly into our struct memory
                 radio.read(&payload, sizeof(payload));
-                
-                // Print a few channels to prove it works
-                printf("[RX] Ch0 (Throttle): %d | Ch1 (Steering): %d | Ch8 (Aux): %d\n", 
-                       payload.channel[0], payload.channel[1], payload.channel[8]);
+                printf("\n[RX] Ch0 (Throttle): %d | Ch1 (Steering): %d\n", 
+                       payload.channel[0], payload.channel[1]);
             }
         }
-        sleep_ms(1); // Keep the loop from hogging the CPU
+        sleep_ms(1); 
     }
     return 0;
 }

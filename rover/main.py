@@ -994,7 +994,8 @@ def _drain_proc(proc: subprocess.Popen) -> None:
         pass
 
 
-def _launch_sim_gps(rover_id: int, real_port: str, gcs_host: str) -> None:
+def _launch_sim_gps(rover_id: int, real_port: str, gcs_host: str,
+                    lat: Optional[float] = None, lon: Optional[float] = None) -> None:
     """Launch simulator/sim.py and update GPS (and UART for RV1 proxy) port globals."""
     global UART_PORT, GPS_PRIMARY_PORT, GPS_SECONDARY_PORT
 
@@ -1005,6 +1006,10 @@ def _launch_sim_gps(rover_id: int, real_port: str, gcs_host: str) -> None:
               "--gcs-host", gcs_host]
     if mode == "proxy":
         cmd += ["--real-port", real_port]
+    if lat is not None:
+        cmd += ["--lat", str(lat)]
+    if lon is not None:
+        cmd += ["--lon", str(lon)]
 
     print(f"[SIM] Starting GPS simulator (rover={rover_id}, mode={mode})…")
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -1068,13 +1073,17 @@ def main() -> None:
     parser.add_argument("--relay-host", default=RELAY_HOST,
                         help="RV2 machine IP for direct RC relay (Rover 1 only). "
                              "Use when WiFi broadcast does not reach RV2.")
+    parser.add_argument("--lat", type=float, default=None,
+                        help="Simulated GPS start latitude (--sim-gps only)")
+    parser.add_argument("--lon", type=float, default=None,
+                        help="Simulated GPS start longitude (--sim-gps only)")
     args = parser.parse_args()
 
     GCS_HOST   = args.gcs_host
     RELAY_HOST = args.relay_host
 
     if args.sim_gps:
-        _launch_sim_gps(ROVER_ID, args.real_port, GCS_HOST)
+        _launch_sim_gps(ROVER_ID, args.real_port, GCS_HOST, args.lat, args.lon)
     # --sim-rc is redundant when --sim-gps is used for RV2 (sim.py emulate mode
     # now embeds the MAVLink RC listener).  Only launch the standalone emulator
     # when sim-gps is NOT active (e.g. real GPS but simulated RC link).
