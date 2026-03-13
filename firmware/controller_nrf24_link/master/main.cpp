@@ -24,7 +24,7 @@
  *   Input  <J:c1,...,c8>    8-channel override (autonomous mode)
  *
  * nRF24L01+ config:
- *   Channel 76, 250 kbps, PA_MAX, no CRC, no auto-ack (one-way)
+ *   Channel 76, 250 kbps, PA_MAX, 1-byte CRC, no auto-ack (one-way)
  *   Payload: RCPayload — 9 × uint16_t = 18 bytes
  *   TX rate: 50 Hz (every 20 ms), rate-limited inside SBUS parse
  *
@@ -306,7 +306,7 @@ int main(void) {
     radio.setChannel(76);
     radio.setPayloadSize(sizeof(RCPayload));
     radio.setAutoAck(false);
-    radio.disableCRC();
+    radio.enableCRC();     // filters noise — both sides must match
     radio.openWritingPipe(NRF_ADDR);
     radio.stopListening();   // TX mode
 

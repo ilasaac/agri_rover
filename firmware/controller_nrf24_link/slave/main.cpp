@@ -23,7 +23,7 @@
  *   Input  <J:c1,...,c8>    8-channel override (AUTONOMOUS mode only — RF must be active)
  *
  * nRF24L01+ config:
- *   Channel 76, 250 kbps, PA_MAX, no CRC, no auto-ack (one-way RX only)
+ *   Channel 76, 250 kbps, PA_MAX, 1-byte CRC, no auto-ack (one-way RX only)
  *   Payload: RCPayload — 9 × uint16_t = 18 bytes
  *   radio.startListening() — never calls write() or stopListening()
  *
@@ -232,7 +232,7 @@ int main(void) {
     radio.setChannel(76);
     radio.setPayloadSize(sizeof(RCPayload));
     radio.setAutoAck(false);
-    radio.disableCRC();
+    radio.enableCRC();     // filters noise — both sides must match
     radio.openReadingPipe(1, NRF_ADDR);
     radio.startListening();   // RX mode — slave never transmits
 
