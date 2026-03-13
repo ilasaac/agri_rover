@@ -542,6 +542,20 @@ class MAVLink:
                     pass
             print(f"[RV1] RC relay → {RELAY_HOST}:{RELAY_PORT}")
 
+        # Replace pymavlink's write() — its default silently swallows socket.error,
+        # making it impossible to know why sendto() failed.  This version is explicit.
+        _sock   = self._mav.port
+        _mav_r  = self._mav
+        def _write(buf: bytes):
+            addr = _mav_r.last_address
+            if not addr:
+                return
+            try:
+                _sock.sendto(buf, addr)
+            except Exception as e:
+                print(f"[MAV WRITE] sendto({addr}) err={e}", flush=True)
+        self._mav.write = _write
+
         self._running = True
         threading.Thread(target=self._recv_loop, daemon=True, name="mav-recv").start()
 
