@@ -416,13 +416,32 @@ class UartEmulator:
                         mav.port.settimeout(0.5)
                     except Exception:
                         pass
+                if self._emu_log:
+                    try:
+                        self._emu_log.write(
+                            f"[{time.strftime('%H:%M:%S')}] bound UDP:{self._listen_port} OK\n"
+                        )
+                        self._emu_log.flush()
+                    except Exception:
+                        pass
                 _rx_total = 0
+                _none_count = 0
                 while self._running:
                     try:
                         msg = mav.recv_msg()
                     except _socket.timeout:
                         continue
                     if msg is None:
+                        _none_count += 1
+                        if self._emu_log and _none_count % 50 == 1:
+                            try:
+                                self._emu_log.write(
+                                    f"[{time.strftime('%H:%M:%S')}] recv_msg→None"
+                                    f" x{_none_count} (bytes arriving but not parseable?)\n"
+                                )
+                                self._emu_log.flush()
+                            except Exception:
+                                pass
                         continue
                     _rx_total += 1
                     sysid = msg.get_srcSystem()
@@ -459,6 +478,14 @@ class UartEmulator:
                         self._last_rx = time.monotonic()
                         self._update_physics(ch)
             except Exception as exc:
+                if self._emu_log:
+                    try:
+                        self._emu_log.write(
+                            f"[{time.strftime('%H:%M:%S')}] ERROR: {exc}\n"
+                        )
+                        self._emu_log.flush()
+                    except Exception:
+                        pass
                 print(f"[EMU] MAV listener error: {exc} — retry in 2 s")
                 time.sleep(2.0)
 
