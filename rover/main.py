@@ -258,7 +258,8 @@ class UARTBridge:
                 pass
 
     def _recv_loop(self) -> None:
-        _log_bytes = 0
+        _log_bytes    = 0
+        _empty_since  = 0.0   # monotonic time when empty reads started (0 = not tracking)
         while self._running:
             try:
                 t0  = time.monotonic()
@@ -270,6 +271,14 @@ class UARTBridge:
                     self._lag(f"readline fast-empty {rl_ms:.0f}ms")
                 elif rl_ms > 200:
                     self._lag(f"readline SLOW {rl_ms:.0f}ms raw={raw!r:.40}")
+                if not raw:
+                    _empty_since = _empty_since or time.monotonic()
+                    if time.monotonic() - _empty_since > 0.5:
+                        self._lag(f"NO DATA from RP2040 for"
+                                  f" {time.monotonic()-_empty_since:.1f}s")
+                        _empty_since = time.monotonic()   # re-arm (log every 0.5s)
+                else:
+                    _empty_since = 0.0
 
                 if raw:
                     line = raw.decode("utf-8", errors="ignore").strip()

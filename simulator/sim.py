@@ -277,7 +277,17 @@ class UartProxy:
         while self._running:
             try:
                 ser = serial.Serial(self._real_port, 115200, timeout=0.1)
+                if self._proxy_log:
+                    try:
+                        self._proxy_log.write(
+                            f"[{time.strftime('%H:%M:%S')}] serial CONNECTED"
+                            f" {self._real_port}\n"
+                        )
+                        self._proxy_log.flush()
+                    except Exception:
+                        pass
                 buf = b""
+                _serial_empty_since = 0.0
                 # Write direction runs in its own thread so it is never blocked
                 # by the serial read (RP2040 → main.py) path.
                 wt = threading.Thread(target=self._pty_to_serial,
@@ -286,6 +296,20 @@ class UartProxy:
                 while self._running:
                     # RP2040 → main.py
                     raw = ser.read(256)
+                    if not raw:
+                        _serial_empty_since = _serial_empty_since or time.monotonic()
+                        if time.monotonic() - _serial_empty_since > 0.5 and self._proxy_log:
+                            try:
+                                self._proxy_log.write(
+                                    f"[{time.strftime('%H:%M:%S')}] RP2040 SILENT for"
+                                    f" {time.monotonic()-_serial_empty_since:.1f}s\n"
+                                )
+                                self._proxy_log.flush()
+                            except Exception:
+                                pass
+                            _serial_empty_since = time.monotonic()  # re-arm
+                    else:
+                        _serial_empty_since = 0.0
                     if raw:
                         try:
                             t0 = time.monotonic()
@@ -309,6 +333,15 @@ class UartProxy:
                             self._sniff_ch(line.decode("utf-8", errors="ignore").strip())
 
             except serial.SerialException as exc:
+                if self._proxy_log:
+                    try:
+                        self._proxy_log.write(
+                            f"[{time.strftime('%H:%M:%S')}] SERIAL ERROR: {exc}"
+                            f" — retry in 2 s\n"
+                        )
+                        self._proxy_log.flush()
+                    except Exception:
+                        pass
                 print(f"[PROXY] {self._real_port}: {exc} — retry in 2 s")
                 time.sleep(2.0)
             finally:
